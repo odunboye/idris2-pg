@@ -188,9 +188,20 @@ record ParameterStatus where
 public export
 record BackendKeyData where
   constructor MkBackendKeyData
-  pid : Int 
+  pid : Int
   secret : Int
 %runElab derive "BackendKeyData" [Show, Eq]
+
+||| A LISTEN/NOTIFY payload from the server. Decoding is complete, but
+||| nothing sends LISTEN or waits for these yet - that needs a way to read
+||| without blocking, which this client doesn't have.
+public export
+record Notification where
+  constructor MkNotification
+  pid     : Int
+  channel : String
+  payload : String
+%runElab derive "Notification" [Show, Eq]
 
 
 public export
@@ -256,6 +267,7 @@ public export
 record Query  where
   constructor MkQuery
   body : String
+%runElab derive "Query" [Show, Eq]
 
 CommandComplete : Type
 CommandComplete = String
@@ -292,8 +304,9 @@ data PGMsg
   | PortalSuspendedMsg
   | EmptyQueryResponseMsg
   | ParameterDescriptionMsg (List Int)
+  | NotificationMsg Notification
   | UnknownMsg Tag Bytes
--- %runElab derive "PGMsg" [Show]
+%runElab derive "PGMsg" [Show]
 
 
 public export

@@ -170,5 +170,25 @@ main = do
               other => putStrLn ("FAIL: unexpected response to cancelled query: " ++ show other)
   closeDB dbSlow
 
+  -- NOTIFY decoding: LISTEN on one connection, NOTIFY from another, and
+  -- confirm the raw frame decodes correctly. No high-level API surfaces
+  -- notifications yet (see Notification's doc comment), so this drives the
+  -- low-level readFrame directly to check the decode fix itself.
+  Right dbListener <- connectDB cfg
+    | Left err => putStrLn ("FAIL connect listener: " ++ displayError err)
+  Right _ <- execCommand dbListener "LISTEN idris2_pg_test_channel" []
+    | Left err => putStrLn ("FAIL LISTEN: " ++ displayError err)
+  Right dbNotifier <- connectDB cfg
+    | Left err => putStrLn ("FAIL connect notifier: " ++ displayError err)
+  Right _ <- execCommand dbNotifier "NOTIFY idris2_pg_test_channel, 'hello'" []
+    | Left err => putStrLn ("FAIL NOTIFY: " ++ displayError err)
+  closeDB dbNotifier
+  notifyFrame <- readFrame (conn dbListener)
+  case notifyFrame of
+       Right (NotificationMsg (MkNotification _ "idris2_pg_test_channel" "hello")) =>
+         putStrLn "OK NOTIFY decodes correctly"
+       other => putStrLn ("FAIL: expected a matching NotificationMsg, got: " ++ show other)
+  closeDB dbListener
+
   closeDB db
   putStrLn "OK done"

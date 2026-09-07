@@ -302,7 +302,13 @@ decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do
             Right fields => Right (NoticeMsg (MkNotice fields))
             Left e => Left e
 
-       NotificationResponseTag => Right (UnknownMsg NotificationResponseTag payload)
+       NotificationResponseTag => case decodeInt32 payload of
+            Right (pgPid, afterPid) => case decodeCString afterPid of
+                 Right (channel, afterChannel) => case decodeCString afterChannel of
+                      Right (msg, _) => Right (NotificationMsg (MkNotification pgPid channel msg))
+                      Left e => Left e
+                 Left e => Left e
+            Left e => Left e
 
        ParameterDescriptionTag => case decodeInt16 payload of
             Right (n, rest) => case decodeInt32List (cast n) rest of
