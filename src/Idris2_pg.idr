@@ -1,6 +1,8 @@
 module Idris2_pg
 
+import Data.Maybe
 import Data.PGTypes
+import Data.PGValue
 import Helper
 import Network.Core
 import Network.RawSocket
@@ -9,20 +11,32 @@ import Derive.Prelude
 test : String
 test = "Hello from Idris2!"
 
-mkDB : String -> String -> String -> Int -> IO (Either String DB)
-mkDB  user password db port= do
-         conn <- connectPG "" port
-         case conn of
-              Nothing =>  pure (Left "Could not connect")
-              (Just pgConn) => do
-                let startuMsg = encode(StartupMsg 3 [("user", user), ("database", db)])
-                spgConn <- sendStartup pgConn startuMsg
-                case spgConn of
-                     Nothing => pure (Left "Error sending StartupMsg")
-                     (Just x) => do
-                          let conx = (mkConnectedPG x)
-                          res <- handleStartupResponse user password conx
-                          pure (Right (MkDB conx (Just res)))
+public export
+record PGConfig where
+  constructor MkPGConfig
+  host     : String
+  port     : Int
+  user     : String
+  password : String
+  database : String
+
+public export
+connectDB : PGConfig -> IO (Either String DB)
+connectDB cfg = do
+  conn <- connectPG (host cfg) (port cfg)
+  case conn of
+       Nothing => pure (Left "Could not connect")
+       (Just pgConn) => do
+         let startupMsg = encode (StartupMsg 3 [("user", user cfg), ("database", database cfg)])
+         spgConn <- sendStartup pgConn startupMsg
+         case spgConn of
+              Nothing => pure (Left "Error sending StartupMsg")
+              (Just x) => do
+                let conx = mkConnectedPG x
+                res <- handleStartupResponse (user cfg) (password cfg) conx
+                case errors res of
+                     (e :: _) => pure (Left (message e))
+                     []       => pure (Right (MkDB conx (Just res)))
 
 
 queryDB : DB -> String -> IO (Either String QueryResult)
@@ -55,6 +69,33 @@ execParams db query params = do
          pure (Right res)
 
 
+-- Runs a query, choosing the simple protocol for zero-arg statements (e.g.
+-- DDL) and the extended protocol otherwise, then reports the first server
+-- error (if any) as a Left instead of a "successful" empty result.
+runQuery : DB -> String -> List (Maybe String) -> IO (Either String QueryResult)
+runQuery db stmt [] = queryDB db stmt
+runQuery db stmt params = execParams db stmt params
+
+collectErrors : QueryResult -> Either String QueryResult
+collectErrors qr = case errors qr of
+     (e :: _) => Left (message e)
+     []       => Right qr
+
+||| Run an INSERT/UPDATE/DELETE/DDL statement. Returns the command tag
+||| (e.g. "INSERT 0 1") on success.
+public export
+execCommand : DB -> String -> List (Maybe String) -> IO (Either String String)
+execCommand db stmt params = do
+  result <- runQuery db stmt params
+  pure (result >>= collectErrors >>= \qr => Right (fromMaybe "" (commandTag qr)))
+
+||| Run a SELECT and return the decoded rows.
+public export
+queryRows : DB -> String -> List (Maybe String) -> IO (Either String (List Row))
+queryRows db stmt params = do
+  result <- runQuery db stmt params
+  pure (result >>= collectErrors >>= \qr => Right (toRows qr))
+
 --closeDB
 closeDB : DB -> IO ()
 closeDB (MkDB (MkPGConnection socket _) _) = do
@@ -62,22 +103,16 @@ closeDB (MkDB (MkPGConnection socket _) _) = do
   _ <- close (MkConnected socket)
   pure ()
 
-listTables : String
-listTables = "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tableowner <> 'postgres';"
-                                                    
-
-
 testDrive : IO ()
 testDrive = do
-  db <- mkDB "root" "" "theideabankdb" 5432
+  let cfg = MkPGConfig "127.0.0.1" 5432 "root" "" "theideabankdb"
+  db <- connectDB cfg
   case db of
        (Left err) => putStrLn err
-       (Right dbConn) => do 
-         --putStrLn (show dbConn)
+       (Right dbConn) => do
          _ <- showStartUpResult (result dbConn)
-         --some <- queryDB dbConn "select * from information_schema.tables"  
-         some <- queryDB dbConn "select * from role"-- listTables --"select version()"
+         some <- queryRows dbConn "select * from role" []
          case some of
               (Left err) => putStrLn err
-              (Right x) => showQueryResult x
+              (Right rows) => printLn rows
          closeDB dbConn

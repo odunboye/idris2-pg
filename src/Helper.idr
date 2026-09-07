@@ -169,9 +169,13 @@ connectPG host port = do
   case sockRes of
     Left _ => pure Nothing
     Right socket => do
-      connRes <- getConnection socket (IPv4Addr 127 0 0 1) port
+      -- Hostname is resolved via getaddrinfo at the C layer, which handles
+      -- both real hostnames and dotted-quad/numeric addresses.
+      connRes <- getConnection socket (Hostname host) port
       case connRes of
-        Nothing => pure Nothing
+        Nothing => do
+          Network.Socket.close socket
+          pure Nothing
         Just _  => pure (Just (MkPGConnection socket []))
 
 

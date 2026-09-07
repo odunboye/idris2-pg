@@ -3,6 +3,9 @@ module Data.PGValue
 import Data.PGTypes
 import Data.List
 import Data.String
+import Derive.Prelude
+
+%language ElabReflection
 
 -- Minimal, pragmatic value decoding for basic CRUD: no pg_type round-trip
 -- (unlike a full client's OID dictionary), just a hardcoded table of common
@@ -40,6 +43,7 @@ public export
 record Row where
   constructor MkRow
   columns : List (String, Maybe String)
+%runElab derive "Row" [Show]
 
 public export
 toRow : RowDescription -> DataRow -> Row
