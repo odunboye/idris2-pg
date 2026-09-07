@@ -14,6 +14,12 @@ import Network.RawSocket
 -- CRUD smoke test against a real Postgres server. Connection details come
 -- from environment variables so this isn't hardcoded to one local setup;
 -- see README for how to point it at a disposable Postgres.
+--
+-- Split into one function per feature area rather than a single giant `do`
+-- block in main: a big enough single do-block was observed to make the
+-- Idris2/Chez executable build take 10+ minutes instead of a few seconds
+-- (confirmed via bisection - not any one construct being expensive, just
+-- overall size/statement count of one function).
 testConfig : IO PGConfig
 testConfig = do
   host <- fromMaybe "127.0.0.1" <$> getEnv "PG_TEST_HOST"
@@ -23,13 +29,8 @@ testConfig = do
   database <- fromMaybe "testdb" <$> getEnv "PG_TEST_DB"
   pure (MkPGConfig host port user password database)
 
-main : IO ()
-main = do
-  cfg <- testConfig
-  Right db <- connectDB cfg
-    | Left err => putStrLn ("FAIL connect: " ++ displayError err)
-  putStrLn "OK connected"
-
+testCrud : DB -> IO ()
+testCrud db = do
   _ <- execCommand db "DROP TABLE IF EXISTS crud_demo" []
 
   Right _ <- execCommand db "CREATE TABLE crud_demo (id INT PRIMARY KEY, name TEXT)" []
@@ -80,7 +81,10 @@ main = do
 
   Right _ <- execCommand db "DROP TABLE crud_demo" []
     | Left err => putStrLn ("FAIL final drop: " ++ displayError err)
+  pure ()
 
+testMultiStatement : DB -> IO ()
+testMultiStatement db = do
   -- Regression test for the multi-statement result-merging fix: a
   -- ';'-separated batch must be rejected by the single-statement API...
   multiViaSingle <- execCommand db "SELECT 1; SELECT 2" []
@@ -98,6 +102,8 @@ main = do
                              _ => putStrLn ("FAIL: execMulti returned wrong values: " ++ show multiResults)
        _ => putStrLn ("FAIL: execMulti returned wrong shape: " ++ show multiResults)
 
+testTransactions : DB -> IO ()
+testTransactions db = do
   -- withTransaction: a Left inside the action must roll back.
   Right _ <- execCommand db "CREATE TABLE tx_demo (id INT)" []
     | Left err => putStrLn ("FAIL create tx_demo: " ++ displayError err)
@@ -123,7 +129,10 @@ main = do
   putStrLn "OK txStatus reports Idle after commit"
 
   _ <- execCommand db "DROP TABLE tx_demo" []
+  pure ()
 
+testValueTypes : DB -> IO ()
+testValueTypes db = do
   -- Live checks for the fuller value typing (array/date/timestamp/numeric).
   Right _ <- execCommand db
     "CREATE TABLE types_demo (tags INT[], d DATE, ts TIMESTAMP, big NUMERIC)" []
@@ -166,13 +175,15 @@ main = do
          putStrLn "OK JSONB decodes correctly"
        other => putStrLn ("FAIL JSONB decode: " ++ show other)
 
+testCancelQuery : PGConfig -> IO ()
+testCancelQuery cfg = do
   -- cancelQuery: send a slow query on its own connection, then cancel it
   -- *before* reading the response - no client-side concurrency needed,
   -- since the cancellation races the server-side pg_sleep, not our client.
   Right dbSlow <- connectDB cfg
     | Left err => putStrLn ("FAIL connect for cancel test: " ++ displayError err)
   let slowFrame = encode (Parse "" "SELECT pg_sleep(2)" [])
-                    ++ encode (Bind "" "" [])
+                    ++ encode (Bind "" "" [] False)
                     ++ encode (Describe 'P' "")
                     ++ encode (Execute "" 0)
                     ++ encode Sync
@@ -189,6 +200,8 @@ main = do
               other => putStrLn ("FAIL: unexpected response to cancelled query: " ++ show other)
   closeDB dbSlow
 
+testNotify : PGConfig -> IO ()
+testNotify cfg = do
   -- NOTIFY decoding: LISTEN on one connection, NOTIFY from another, and
   -- confirm the raw frame decodes correctly. No high-level API surfaces
   -- notifications yet (see Notification's doc comment), so this drives the
@@ -209,6 +222,8 @@ main = do
        other => putStrLn ("FAIL: expected a matching NotificationMsg, got: " ++ show other)
   closeDB dbListener
 
+testNullHandling : DB -> IO ()
+testNullHandling db = do
   -- Regression test for the decodeInt32 sign-extension bug the unit tests
   -- caught (a NULL's -1 length marker was decoding as 4294967295, which
   -- would corrupt the rest of the row): a NULL bound as a parameter, and a
@@ -225,7 +240,10 @@ main = do
        (Just (Just "present"), Just Nothing) => putStrLn "OK NULL round-trips correctly alongside a real value"
        vals => putStrLn ("FAIL null_demo values: " ++ show vals)
   _ <- execCommand db "DROP TABLE null_demo" []
+  pure ()
 
+testPreparedCache : DB -> IO ()
+testPreparedCache db = do
   -- Prepared statement caching: running the same query text twice should
   -- populate, then reuse, one cache entry keyed by that text (white-box
   -- check on DB.stmtCache, not just that results stay correct - that alone
@@ -249,5 +267,52 @@ main = do
               other => putStrLn ("FAIL: expected a cache entry both times: " ++ show other)
        other => putStrLn ("FAIL prepared statement caching results: " ++ show other)
 
+testBinaryFormat : DB -> IO ()
+testBinaryFormat db = do
+  -- Binary format: request binary results and decode via the format-aware
+  -- getInt/getBool/getDouble/getText (Data.PGBinary's from-scratch IEEE754
+  -- decoding for the floats).
+  Right _ <- execCommand db
+    "CREATE TABLE binary_demo (a INT4, b INT8, c BOOL, d FLOAT4, e FLOAT8, f TEXT)" []
+    | Left err => putStrLn ("FAIL create binary_demo: " ++ displayError err)
+  Right _ <- execCommand db
+    "INSERT INTO binary_demo VALUES ($1, $2, $3, $4, $5, $6)"
+    [Just "70000", Just "9223372036854775807", Just "true", Just "3.5", Just "2.5", Just "hi"]
+    | Left err => putStrLn ("FAIL insert binary_demo: " ++ displayError err)
+  Right [binRow] <- queryRowsBinary db "SELECT a, b, c, d, e, f FROM binary_demo" []
+    | Left err => putStrLn ("FAIL select binary_demo: " ++ displayError err)
+    | Right rs => putStrLn ("FAIL: unexpected row count for binary_demo: " ++ show rs)
+  let binOk = getInt binRow "a" == Right 70000
+           && getInteger binRow "b" == Right 9223372036854775807
+           && getBool binRow "c" == Right True
+           && getDouble binRow "d" == Right 3.5
+           && getDouble binRow "e" == Right 2.5
+           && getText binRow "f" == Right "hi"
+  if binOk
+     then putStrLn "OK binary format decodes correctly (int4/int8/bool/float4/float8/text)"
+     else putStrLn ("FAIL binary_demo decode: a=" ++ show (getInt binRow "a")
+                      ++ " b=" ++ show (getInteger binRow "b")
+                      ++ " c=" ++ show (getBool binRow "c")
+                      ++ " d=" ++ show (getDouble binRow "d")
+                      ++ " e=" ++ show (getDouble binRow "e")
+                      ++ " f=" ++ show (getText binRow "f"))
+  _ <- execCommand db "DROP TABLE binary_demo" []
+  pure ()
+
+main : IO ()
+main = do
+  cfg <- testConfig
+  Right db <- connectDB cfg
+    | Left err => putStrLn ("FAIL connect: " ++ displayError err)
+  putStrLn "OK connected"
+  testCrud db
+  testMultiStatement db
+  testTransactions db
+  testValueTypes db
+  testCancelQuery cfg
+  testNotify cfg
+  testNullHandling db
+  testPreparedCache db
+  testBinaryFormat db
   closeDB db
   putStrLn "OK done"

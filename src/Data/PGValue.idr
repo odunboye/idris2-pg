@@ -2,6 +2,8 @@ module Data.PGValue
 
 import Data.PGTypes
 import public Data.PGJson
+import Data.PGBinary
+import Helper
 import Data.List
 import Data.String
 import Derive.Prelude
@@ -38,17 +40,30 @@ builtinOid 1184 = OidTimestamptz
 builtinOid 1700 = OidNumeric
 builtinOid n    = OidOther n
 
-||| One decoded result row: column name paired with its (possibly NULL)
-||| text-format value, in column order.
+public export
+data ColFormat = FmtText | FmtBinary
+%runElab derive "ColFormat" [Show, Eq]
+
+toColFormat : Int -> ColFormat
+toColFormat 1 = FmtBinary
+toColFormat _ = FmtText
+
+||| One decoded result row: column name, wire format, and its (possibly
+||| NULL) raw value, in column order. Format is text unless the query was
+||| run via queryRowsBinary.
 public export
 record Row where
   constructor MkRow
-  columns : List (String, Maybe String)
+  columns : List (String, ColFormat, Maybe Bytes)
 %runElab derive "Row" [Show]
+
+zipCols : List FieldDescription -> List (Maybe Bytes) -> List (String, ColFormat, Maybe Bytes)
+zipCols (f :: fs) (c :: cs) = (name f, toColFormat (formatCode f), c) :: zipCols fs cs
+zipCols _          _        = []
 
 public export
 toRow : RowDescription -> DataRow -> Row
-toRow desc row = MkRow (zip (map name (fields desc)) (columns row))
+toRow desc row = MkRow (zipCols (fields desc) (columns row))
 
 ||| Decode every row of a query result. Empty if the query had no
 ||| RowDescription (e.g. it was a command, not a SELECT).
@@ -58,55 +73,105 @@ toRows qr = case description qr of
      Nothing => []
      Just desc => map (toRow desc) (rows qr)
 
+getRawColumn : Row -> String -> Either String (ColFormat, Maybe Bytes)
+getRawColumn (MkRow cols) colName =
+  case find (\(n, _, _) => n == colName) cols of
+       Nothing            => Left ("No such column: " ++ colName)
+       Just (_, fmt, b)   => Right (fmt, b)
+
+||| Text-shaped view of a column regardless of its wire format (UTF-8
+||| decoding raw bytes is correct for both - Postgres's binary format for
+||| text-like types is just the same UTF-8 bytes as text format). Nothing
+||| if the column doesn't exist; Just Nothing if it's NULL.
 public export
 columnByName : Row -> String -> Maybe (Maybe String)
-columnByName (MkRow cols) colName = lookup colName cols
+columnByName row colName = case getRawColumn row colName of
+     Left _              => Nothing
+     Right (_, Nothing)  => Just Nothing
+     Right (_, Just b)   => Just (Just (bytesToString b))
 
 public export
 getText : Row -> String -> Either String String
-getText row colName =
-  case columnByName row colName of
-       Nothing       => Left ("No such column: " ++ colName)
-       Just Nothing  => Left (colName ++ " is NULL")
-       Just (Just s) => Right s
+getText row colName = do
+  (_, bytes) <- getRawColumn row colName
+  case bytes of
+       Nothing => Left (colName ++ " is NULL")
+       Just b  => Right (bytesToString b)
 
+||| Understands both formats: text (parsed as decimal digits) and binary
+||| (dispatched on byte width - 2/4/8 bytes for int2/int4/int8). See
+||| queryRowsBinary's doc comment for the binary-mode type-mismatch caveat.
 public export
 getInt : Row -> String -> Either String Int
 getInt row colName = do
-  s <- getText row colName
-  case parseInteger {a = Int} s of
-       Nothing => Left ("Invalid integer in " ++ colName ++ ": " ++ s)
-       Just n  => Right n
+  (fmt, bytes) <- getRawColumn row colName
+  case bytes of
+       Nothing => Left (colName ++ " is NULL")
+       Just b  => case fmt of
+            FmtText   => case parseInteger {a = Int} (bytesToString b) of
+                 Nothing => Left ("Invalid integer in " ++ colName ++ ": " ++ bytesToString b)
+                 Just n  => Right n
+            FmtBinary => case decodeBinaryInt b of
+                 Left err => Left ("Invalid binary integer in " ++ colName ++ ": " ++ err)
+                 Right n  => Right n
 
+||| Understands both formats: text (parsed as a decimal/exponent literal)
+||| and binary (dispatched on byte width - 4 bytes for float4, 8 for
+||| float8, decoded via from-scratch IEEE754 bit manipulation - see
+||| Data.PGBinary). See queryRowsBinary's doc comment for the binary-mode
+||| type-mismatch caveat.
 public export
 getDouble : Row -> String -> Either String Double
 getDouble row colName = do
-  s <- getText row colName
-  case parseDouble s of
-       Nothing => Left ("Invalid double in " ++ colName ++ ": " ++ s)
-       Just d  => Right d
+  (fmt, bytes) <- getRawColumn row colName
+  case bytes of
+       Nothing => Left (colName ++ " is NULL")
+       Just b  => case fmt of
+            FmtText   => case parseDouble (bytesToString b) of
+                 Nothing => Left ("Invalid double in " ++ colName ++ ": " ++ bytesToString b)
+                 Just d  => Right d
+            FmtBinary => case decodeBinaryDouble b of
+                 Left err => Left ("Invalid binary double in " ++ colName ++ ": " ++ err)
+                 Right d  => Right d
 
+||| Understands both formats: text ("t"/"true"/"1" or "f"/"false"/"0") and
+||| binary (a single byte, 0 = False, nonzero = True).
 public export
 getBool : Row -> String -> Either String Bool
 getBool row colName = do
-  s <- getText row colName
-  case s of
-       "t"     => Right True
-       "true"  => Right True
-       "1"     => Right True
-       "f"     => Right False
-       "false" => Right False
-       "0"     => Right False
-       _       => Left ("Invalid boolean in " ++ colName ++ ": " ++ s)
+  (fmt, bytes) <- getRawColumn row colName
+  case bytes of
+       Nothing => Left (colName ++ " is NULL")
+       Just b  => case fmt of
+            FmtText   => case bytesToString b of
+                 "t"     => Right True
+                 "true"  => Right True
+                 "1"     => Right True
+                 "f"     => Right False
+                 "false" => Right False
+                 "0"     => Right False
+                 s       => Left ("Invalid boolean in " ++ colName ++ ": " ++ s)
+            FmtBinary => case decodeBinaryBool b of
+                 Left err => Left ("Invalid binary boolean in " ++ colName ++ ": " ++ err)
+                 Right v  => Right v
 
 ||| Arbitrary-precision, for `numeric`/`bigint` values that don't fit `Int`.
+||| In binary mode this only understands int2/int4/int8 (dispatched by
+||| byte width, then widened) - binary `numeric`'s own wire format is a
+||| distinct, more involved encoding that isn't supported here.
 public export
 getInteger : Row -> String -> Either String Integer
 getInteger row colName = do
-  s <- getText row colName
-  case parseInteger {a = Integer} s of
-       Nothing => Left ("Invalid integer in " ++ colName ++ ": " ++ s)
-       Just n  => Right n
+  (fmt, bytes) <- getRawColumn row colName
+  case bytes of
+       Nothing => Left (colName ++ " is NULL")
+       Just b  => case fmt of
+            FmtText   => case parseInteger {a = Integer} (bytesToString b) of
+                 Nothing => Left ("Invalid integer in " ++ colName ++ ": " ++ bytesToString b)
+                 Just n  => Right n
+            FmtBinary => case decodeBinaryInt b of
+                 Left err => Left ("Invalid binary integer in " ++ colName ++ ": " ++ err)
+                 Right n  => Right (cast n)
 
 public export
 record PGDate where

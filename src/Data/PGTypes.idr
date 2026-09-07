@@ -160,7 +160,11 @@ public export
 record DataRow where
   constructor MkDataRow
   columnCount : Int
-  columns     : List (Maybe String)
+  -- Raw bytes, not decoded to String here: a column can be in binary
+  -- format (see Bind's binaryResults flag and FieldDescription.formatCode),
+  -- whose bytes generally aren't valid UTF-8 text. Text-vs-binary decoding
+  -- happens in Data.PGValue, which has the per-column format available.
+  columns     : List (Maybe Bytes)
 %runElab derive "DataRow" [Show, Eq]
 
 
@@ -266,7 +270,7 @@ data PGMsg
   -- names ("") are used throughout since this client doesn't cache/reuse
   -- prepared statements across calls.
   | Parse String String (List Int)             -- stmt name, query, param type OIDs (0 = infer)
-  | Bind String String (List (Maybe Bytes))     -- portal, stmt, text-encoded params (Nothing = NULL)
+  | Bind String String (List (Maybe Bytes)) Bool -- portal, stmt, text-encoded params (Nothing = NULL), request binary results
   | Describe Char String                        -- 'S' (statement) or 'P' (portal), name
   | Execute String Int                          -- portal, max rows (0 = unlimited)
   | Sync

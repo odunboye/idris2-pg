@@ -70,8 +70,8 @@ queryDB db str = do
 -- it was never cached to begin with, or because something upstream of the
 -- statement itself changed) so a bad cache entry never sticks around - at
 -- worst that just costs an extra re-Parse next time, same as no caching.
-execParams : DB -> String -> List (Maybe String) -> IO (Either PGError (List QueryResult))
-execParams db query params = do
+execParams : DB -> String -> List (Maybe String) -> Bool -> IO (Either PGError (List QueryResult))
+execParams db query params wantBinary = do
   cache <- readIORef (stmtCache db)
   case lookup query cache of
        Just stmtName => runPrepared stmtName False
@@ -91,7 +91,7 @@ execParams db query params = do
       let bindParams = map (map stringToBytes) params
           parseFrame = if isNew then encode (Parse stmtName query []) else []
           frame = parseFrame
-                    ++ encode (Bind "" stmtName bindParams)
+                    ++ encode (Bind "" stmtName bindParams wantBinary)
                     ++ encode (Describe 'P' "")
                     ++ encode (Execute "" 0)
                     ++ encode Sync
@@ -113,11 +113,12 @@ execParams db query params = do
              pure res
 
 
--- Runs a query, choosing the simple protocol for zero-arg statements (e.g.
--- DDL) and the extended protocol otherwise.
-runQuery : DB -> String -> List (Maybe String) -> IO (Either PGError (List QueryResult))
-runQuery db stmt [] = queryDB db stmt
-runQuery db stmt params = execParams db stmt params
+-- Runs a query, choosing the simple protocol (always text) for zero-param,
+-- text-format requests, and the extended protocol otherwise - the simple
+-- protocol has no way to request binary results at all.
+runQuery : DB -> String -> List (Maybe String) -> Bool -> IO (Either PGError (List QueryResult))
+runQuery db stmt [] False = queryDB db stmt
+runQuery db stmt params wantBinary = execParams db stmt params wantBinary
 
 -- execCommand/queryRows are single-statement APIs; a ';'-separated batch
 -- would otherwise have its results silently merged/corrupted, so this
@@ -139,14 +140,30 @@ collectErrors qr = case errors qr of
 public export
 execCommand : DB -> String -> List (Maybe String) -> IO (Either PGError String)
 execCommand db stmt params = do
-  result <- runQuery db stmt params
+  result <- runQuery db stmt params False
   pure (result >>= singleResult >>= collectErrors >>= \qr => Right (fromMaybe "" (commandTag qr)))
 
-||| Run a SELECT and return the decoded rows.
+||| Run a SELECT and return the decoded rows, in text format (the default -
+||| see "Value decoding" for what this covers).
 public export
 queryRows : DB -> String -> List (Maybe String) -> IO (Either PGError (List Row))
 queryRows db stmt params = do
-  result <- runQuery db stmt params
+  result <- runQuery db stmt params False
+  pure (result >>= singleResult >>= collectErrors >>= \qr => Right (toRows qr))
+
+||| Like queryRows, but requests binary format for every result column.
+||| Only getInt/getInteger/getBool/getDouble/getText understand binary
+||| format (see their doc comments); the others (getDate/getTimestamp/
+||| getArray*/getJSON) only support text and will fail clearly if used on
+||| a binary-format column. Unlike text mode, a type mismatch here (e.g.
+||| calling getDouble on a binary int4 column) is not guaranteed to fail
+||| cleanly - binary formats don't self-describe their type the way text
+||| does, so this is a "you must get the types right" opt-in, not a safer
+||| default.
+public export
+queryRowsBinary : DB -> String -> List (Maybe String) -> IO (Either PGError (List Row))
+queryRowsBinary db stmt params = do
+  result <- runQuery db stmt params True
   pure (result >>= singleResult >>= collectErrors >>= \qr => Right (toRows qr))
 
 ||| Run a (possibly ';'-separated, multi-statement) batch via the simple

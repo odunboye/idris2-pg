@@ -15,6 +15,12 @@ check label expected actual =
 strBytes : String -> List Bits8
 strBytes s = map (cast . ord) (unpack s)
 
+mkTextRow : List (String, Maybe String) -> Row
+mkTextRow cols = MkRow (map (\(n, v) => (n, FmtText, map strBytes v)) cols)
+
+mkBinaryRow : List (String, Maybe (List Bits8)) -> Row
+mkBinaryRow cols = MkRow (map (\(n, v) => (n, FmtBinary, v)) cols)
+
 -- Checks that `bytes` is [tag] ++ encodeInt32 len ++ payload with
 -- len == 4 + length payload (i.e. the frame is internally consistent),
 -- then hands the payload to `checkPayload` for message-specific checks.
@@ -86,7 +92,23 @@ main = do
                    other => putStrLn ("FAIL Bind format count: " ++ show other)
               other => putStrLn ("FAIL Bind stmt name: " ++ show other)
          other => putStrLn ("FAIL Bind portal name: " ++ show other))
-    (encode (Bind "" "" [Just (strBytes "hello"), Nothing]))
+    (encode (Bind "" "" [Just (strBytes "hello"), Nothing] False))
+
+  checkFrame "Bind with binary results" 0x42
+    (\payload => case decodeCString payload of
+         Right ("", afterPortal) => case decodeCString afterPortal of
+              Right ("", afterStmt) => case decodeInt16 afterStmt of
+                   Right (0, afterFmtCount) => case decodeInt16 afterFmtCount of
+                        Right (0, afterParamCount) => case decodeInt16 afterParamCount of
+                             Right (1, afterResultCount) => case decodeInt16 afterResultCount of
+                                  Right (1, []) => putStrLn "OK Bind binary-results format section"
+                                  other => putStrLn ("FAIL Bind binary result format code: " ++ show other)
+                             other => putStrLn ("FAIL Bind result format count: " ++ show other)
+                        other => putStrLn ("FAIL Bind param count: " ++ show other)
+                   other => putStrLn ("FAIL Bind format count: " ++ show other)
+              other => putStrLn ("FAIL Bind stmt name: " ++ show other)
+         other => putStrLn ("FAIL Bind portal name: " ++ show other))
+    (encode (Bind "" "" [] True))
 
   check "Sync bytes" [0x53, 0, 0, 0, 4] (encode Sync)
   check "Terminate bytes" [0x58, 0, 0, 0, 4] (encode Terminate)
@@ -146,23 +168,38 @@ main = do
   check "parsePGArray on a 2D value reports a clear error" True
     (isLeft (parsePGArray "{{1,2},{3,4}}"))
   check "getArray2D" (Right [[Just "1", Just "2"], [Just "3", Just "4"]])
-    (getArray2D (MkRow [("m", Just "{{1,2},{3,4}}")]) "m")
+    (getArray2D (mkTextRow [("m", Just "{{1,2},{3,4}}")]) "m")
   check "getArray2D on a 1D value reports a clear error" True
-    (isLeft (getArray2D (MkRow [("m", Just "{1,2}")]) "m"))
+    (isLeft (getArray2D (mkTextRow [("m", Just "{1,2}")]) "m"))
 
-  check "getInt ok" (Right 42) (getInt (MkRow [("n", Just "42")]) "n")
-  check "getInt bad" True (isLeft (getInt (MkRow [("n", Just "abc")]) "n"))
-  check "getInt null" True (isLeft (getInt (MkRow [("n", Nothing)]) "n"))
-  check "getBool t" (Right True) (getBool (MkRow [("b", Just "t")]) "b")
-  check "getBool f" (Right False) (getBool (MkRow [("b", Just "f")]) "b")
-  check "getDouble ok" (Right 3.5) (getDouble (MkRow [("d", Just "3.5")]) "d")
+  check "getInt ok" (Right 42) (getInt (mkTextRow [("n", Just "42")]) "n")
+  check "getInt bad" True (isLeft (getInt (mkTextRow [("n", Just "abc")]) "n"))
+  check "getInt null" True (isLeft (getInt (mkTextRow [("n", Nothing)]) "n"))
+  check "getBool t" (Right True) (getBool (mkTextRow [("b", Just "t")]) "b")
+  check "getBool f" (Right False) (getBool (mkTextRow [("b", Just "f")]) "b")
+  check "getDouble ok" (Right 3.5) (getDouble (mkTextRow [("d", Just "3.5")]) "d")
+
+  -- binary-format value decoding (Data.PGBinary, via getInt/getBool/getDouble)
+  check "getInt binary int2" (Right 300) (getInt (mkBinaryRow [("n", Just (encodeInt16 300))]) "n")
+  check "getInt binary int4" (Right 70000) (getInt (mkBinaryRow [("n", Just (encodeInt32 70000))]) "n")
+  check "getInt binary int8" (Right 300) (getInt (mkBinaryRow [("n", Just [0, 0, 0, 0, 0, 0, 1, 0x2c])]) "n")
+  check "getInteger binary int8 widens" (Right 300) (getInteger (mkBinaryRow [("n", Just [0, 0, 0, 0, 0, 0, 1, 0x2c])]) "n")
+  check "getBool binary true" (Right True) (getBool (mkBinaryRow [("b", Just [1])]) "b")
+  check "getBool binary false" (Right False) (getBool (mkBinaryRow [("b", Just [0])]) "b")
+  check "getDouble binary float4 1.0" (Right 1.0) (getDouble (mkBinaryRow [("d", Just [0x3f, 0x80, 0x00, 0x00])]) "d")
+  check "getDouble binary float8 1.0" (Right 1.0)
+    (getDouble (mkBinaryRow [("d", Just [0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])]) "d")
+  check "getInt binary wrong width reports a clear error" True
+    (isLeft (getInt (mkBinaryRow [("n", Just [1, 2, 3])]) "n"))
+  check "columnByName works for binary text-like column" (Just (Just "hi"))
+    (columnByName (mkBinaryRow [("s", Just (strBytes "hi"))]) "s")
   check "getInteger big" (Right 123456789012345678901234567890)
-    (getInteger (MkRow [("n", Just "123456789012345678901234567890")]) "n")
-  check "getDate ok" (Right (MkPGDate 2024 3 7)) (getDate (MkRow [("d", Just "2024-03-07")]) "d")
+    (getInteger (mkTextRow [("n", Just "123456789012345678901234567890")]) "n")
+  check "getDate ok" (Right (MkPGDate 2024 3 7)) (getDate (mkTextRow [("d", Just "2024-03-07")]) "d")
   check "getTimestamp ok" (Right (MkPGTimestamp (MkPGDate 2024 3 7) 13 45 30))
-    (getTimestamp (MkRow [("ts", Just "2024-03-07 13:45:30")]) "ts")
+    (getTimestamp (mkTextRow [("ts", Just "2024-03-07 13:45:30")]) "ts")
   check "getTimestamp with fraction" (Right (MkPGTimestamp (MkPGDate 2024 3 7) 13 45 30))
-    (getTimestamp (MkRow [("ts", Just "2024-03-07 13:45:30.123456")]) "ts")
+    (getTimestamp (mkTextRow [("ts", Just "2024-03-07 13:45:30.123456")]) "ts")
 
   -- JSON (Data.PGJson, via getJSON)
   check "parseJSON null" (Right JNull) (parseJSON "null")
@@ -175,7 +212,7 @@ main = do
   check "parseJSON whitespace tolerant" (Right (JObject [("a", JNumber 1.0)])) (parseJSON " { \"a\" : 1 } ")
   check "parseJSON trailing content rejected" True (isLeft (parseJSON "1 2"))
   check "parseJSON bad literal rejected" True (isLeft (parseJSON "nul"))
-  check "getJSON" (Right (JObject [("a", JNumber 1.0)])) (getJSON (MkRow [("j", Just "{\"a\":1}")]) "j")
+  check "getJSON" (Right (JObject [("a", JNumber 1.0)])) (getJSON (mkTextRow [("j", Just "{\"a\":1}")]) "j")
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True

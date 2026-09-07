@@ -21,9 +21,10 @@ modules = Network.Core
         , Network.RawSocket
         , Data.PGTypes
         , Data.PGJson
-        , Data.PGValue
         , Crypto.MD5
         , Helper
+        , Data.PGBinary
+        , Data.PGValue
         , Idris2_pg
 
 -- main file (i.e. file to load at REPL)

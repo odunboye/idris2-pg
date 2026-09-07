@@ -82,13 +82,27 @@ handling).
 
 ### Value decoding
 
-`Data.PGValue` decodes a `Row`'s text-format columns on demand:
-`getText`, `getInt`, `getInteger` (arbitrary precision), `getDouble`,
-`getBool`, `getDate`/`getTimestamp` (`PGDate`/`PGTimestamp` records),
+`Data.PGValue` decodes a `Row`'s columns on demand: `getText`, `getInt`,
+`getInteger` (arbitrary precision), `getDouble`, `getBool`,
+`getDate`/`getTimestamp` (`PGDate`/`PGTimestamp` records),
 `getArray`/`getArray2D`/`getNestedArray` (Postgres arrays of any
 dimensionality, via the `PGArrayValue` tree for anything beyond 2D), and
 `getJSON` (`json`/`jsonb` columns, via a small dependency-free JSON parser
 in `Data.PGJson` — no external JSON library needed).
+
+`queryRows` returns text-format columns (the default). `queryRowsBinary`
+requests binary format for every column instead; `getInt`/`getInteger`/
+`getBool`/`getDouble`/`getText` understand both formats transparently
+(binary floats are decoded via a from-scratch, verified-against-reference-values
+IEEE754 implementation in `Data.PGBinary`, since Idris2 has no 32-bit-float
+primitive to lean on). The other accessors (`getDate`/`getTimestamp`/
+`getArray*`/`getJSON`) only support text format. Binary mode is opt-in and
+less safe than text: unlike text parsing, a type mismatch (e.g. calling
+`getDouble` on a binary `int4` column) isn't guaranteed to fail cleanly,
+since binary formats don't self-describe their type the way text does.
+Binary-format parameter *sending* isn't implemented — parameters are
+always sent as text, which Postgres accepts and casts correctly for every
+type.
 
 ### Errors
 
@@ -142,13 +156,14 @@ CI (`.github/workflows/ci.yml`) runs both on every push/PR.
 - [x] Value decoding: text/int/bool/double/arbitrary-precision integer/date/timestamp/array of any dimensionality/JSON (see "Value decoding" above)
 - [x] Prepared statement caching — a query text is Parsed once per
       connection and reused on repeat calls (see `DB.stmtCache`).
+- [x] Binary format for results (`queryRowsBinary`) — see "Value decoding"
+      above for what's covered and its caveats. Sending binary-format
+      parameters isn't implemented; parameters are always sent as text.
 - [ ] SCRAM-SHA-256 auth — Postgres 14+'s default for new roles. Only
       trust/md5/cleartext are implemented; a role authenticating against this
       client needs `password_encryption = md5` (see above) or `trust`.
 - [ ] TLS/SSL — the underlying socket layer has no TLS support at all.
 - [ ] The `COPY` protocol — no bulk import/export.
-- [ ] Binary format — everything is text format, both for parameters sent
-      and results received.
 - [ ] Read/connect timeouts — a hung or unresponsive server can block a call
       indefinitely; there's no way to bound that today.
 - [ ] LISTEN/NOTIFY consumption — decoding works, but nothing exposes a way

@@ -83,6 +83,31 @@ decodeInt32 (b1 :: b2 :: b3 :: b4 :: rest) =
   in Right (signed, rest)
 decodeInt32 _ = Left "decodeInt32: insufficient bytes"
 
+-- Built via Integer (arbitrary precision, never overflows) rather than
+-- Int, unlike decodeInt16/32: Int is only guaranteed to be 64 bits wide,
+-- exactly as wide as the value being decoded, so there's no headroom for
+-- the same "build unsigned, then reinterpret as signed" trick those use -
+-- e.g. the unsigned magnitude of INT64_MIN (2^63) doesn't fit in a
+-- positive Int64 at all. Integer sidesteps that entirely.
+public export
+decodeInt64 : Bytes -> Either String (Int, Bytes)
+decodeInt64 (b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: b7 :: b8 :: rest) =
+  let raw : Integer
+      raw = (cast b1 * 72057594037927936)   -- 256^7
+          + (cast b2 * 281474976710656)     -- 256^6
+          + (cast b3 * 1099511627776)       -- 256^5
+          + (cast b4 * 4294967296)          -- 256^4
+          + (cast b5 * 16777216)            -- 256^3
+          + (cast b6 * 65536)               -- 256^2
+          + (cast b7 * 256)
+          + cast b8
+      signed : Integer
+      signed = if raw >= 9223372036854775808          -- 2^63
+                  then raw - 18446744073709551616      -- 2^64
+                  else raw
+  in Right (fromInteger signed, rest)
+decodeInt64 _ = Left "decodeInt64: insufficient bytes"
+
 -- Encode/decode null-terminated UTF8 string
 public export
 encodeCString : String -> List Bits8
@@ -201,7 +226,10 @@ sendStartup conn msg = do
        (Left x) => pure Nothing
        (Right x) => pure (Just(MkPGConnection (socket conn) []))
 
-parseColumns : Nat -> Bytes -> Either String (List (Maybe String))
+-- Keeps raw bytes rather than decoding to String here: a column can be in
+-- binary format, whose bytes generally aren't valid UTF-8 text. See
+-- DataRow.columns.
+parseColumns : Nat -> Bytes -> Either String (List (Maybe Bytes))
 parseColumns Z rest = Right []
 parseColumns (S k) bs = do
   (len, afterLen) <- decodeInt32 bs
@@ -210,7 +238,7 @@ parseColumns (S k) bs = do
         rest <- parseColumns k afterLen
         Right (Nothing :: rest)
       False => do
-        let val = bytesToString (take (cast len) afterLen)
+        let val = take (cast len) afterLen
         rest <- parseColumns k (drop (cast len) afterLen)
         Right (Just val :: rest)
 
@@ -243,15 +271,19 @@ encode (Parse stmtName query paramTypes) =
       len = 4 + length payload
   in [0x50] ++ encodeInt32 (cast len) ++ payload  -- 'P'
 
-encode (Bind portal stmtName params) =
+encode (Bind portal stmtName params binaryResults) =
   let encodeParam : Maybe Bytes -> Bytes
       encodeParam Nothing = encodeInt32 (-1)
       encodeParam (Just bytes) = encodeInt32 (cast (length bytes)) ++ bytes
+      -- A single format code (rather than one per column) applies to all
+      -- of them - 0 = text, 1 = binary.
+      resultFormatSection : Bytes
+      resultFormatSection = if binaryResults then encodeInt16 1 ++ encodeInt16 1 else encodeInt16 0
       payload = encodeCString portal ++ encodeCString stmtName
                   ++ encodeInt16 0  -- all parameters are text format
                   ++ encodeInt16 (cast (length params))
                   ++ concatMap encodeParam params
-                  ++ encodeInt16 0  -- all results in text format
+                  ++ resultFormatSection
       len = 4 + length payload
   in [0x42] ++ encodeInt32 (cast len) ++ payload  -- 'B'
 
