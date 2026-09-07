@@ -6,6 +6,8 @@ import Helper
 import Crypto.MD5
 import Crypto.SCRAM
 import Crypto.Curve25519
+import Crypto.ChaCha20
+import Crypto.Poly1305
 import Data.PGValue
 import Network.Timeout
 import System
@@ -286,6 +288,35 @@ main = do
   check "x25519PublicKey derives Bob's public key" bPub (toHex (x25519PublicKey bPriv))
   check "x25519 shared secret (Alice's view)" shared (toHex (x25519 aPriv (hexToBytes bPub)))
   check "x25519 shared secret (Bob's view)" shared (toHex (x25519 bPriv (hexToBytes aPub)))
+
+  -- Crypto.ChaCha20, against Python cryptography-generated reference
+  -- keystreams (a single-block and a multi-block, non-64-byte-aligned case).
+  let ccKey1 = hexToBytes "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  let ccNonce1 = hexToBytes "000000090000004a00000000"
+  let ccExpected1 = "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e"
+  check "chacha20 block keystream, counter=1" ccExpected1 (toHex (chacha20 ccKey1 1 ccNonce1 (replicate 64 0)))
+
+  let ccKey2 = hexToBytes "19100317fa185880b21df4527bd81ad27a7ca1f83f7ac360198384d7bee624e0"
+  let ccNonce2 = hexToBytes "99b88da14222e026f14b6b1a"
+  let ccExpected2 = "ed4d3f4da99f94533e4820e2be60171428360c4141e55ab27a89b59a385c12d5a270ee4b1c745a632bc9c79fbdb9b9aa48fb4d9386aa2b0de911ebc55fee459b0aac977bd983d2d135952a4e9f7bf2d52221acf2984cc33b0b0289ba75baa65e1de96846f6a9cdd5eb753c0d2bb5e4a3653ce403b763a4f859a212319198d1d9c03891bc44e78ff2fb3123f7b67cf8243005060d25627009049ed46f1dbdf71c5e872d46588fd22e9b95a2b37798ba1075cb4613b7e6d7fc45e6d9a8e81d30b69576311e7eef3eb9"
+  check "chacha20 multi-block keystream, counter=5, 200 bytes" ccExpected2
+    (toHex (chacha20 ccKey2 5 ccNonce2 (replicate 200 0)))
+
+  let ccPlain = strBytes "the quick brown fox jumps over the lazy dog, 1234567890!"
+  let ccCipher = chacha20 ccKey1 1 ccNonce1 ccPlain
+  check "chacha20 round-trip (decrypt undoes encrypt)" True (chacha20 ccKey1 1 ccNonce1 ccCipher == ccPlain)
+
+  -- Crypto.Poly1305, against Python cryptography-generated reference tags.
+  let pKey1 = hexToBytes "741f01e2d81caf7ccd490abda24222212ec4842a607373b7cf998e456a8510bc"
+  let pMsg1 = hexToBytes "43727970746f6772617068696320466f72756d2052657365617263682047726f7570"
+  check "poly1305 tag" "debd358adca479f7f4c06346171ade21" (toHex (poly1305 pKey1 pMsg1))
+
+  let pKey2 = hexToBytes "6f62bf65ac2329171d7528dfb01314b50c0930947d51a394634576f905873ed2"
+  let pMsg2 = hexToBytes "097d3c6ed1644b19cc92d09907686ca1ffe92a49e1f48e89f0bca46ceaf5acdd13ac91624a5ccbbe96d5ad82f0343345d26a66db2109fb4c55829585cf810ecb658e1089f0a667c97377efd419c0970bc0a410fb6bcdb0aed4e749b25953783ddd"
+  check "poly1305 tag on a non-16-byte-aligned message" "9ae4156b5a5f201f80a2fdc95928a8e5" (toHex (poly1305 pKey2 pMsg2))
+
+  let pKey3 = hexToBytes "d86877c4b05d71ca0631f4a50b39f0161d8dc779c1aff63d15ef1e14bb467eb7"
+  check "poly1305 tag on an empty message" "1d8dc779c1aff63d15ef1e14bb467eb7" (toHex (poly1305 pKey3 []))
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True

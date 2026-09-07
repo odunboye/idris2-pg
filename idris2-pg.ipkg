@@ -27,6 +27,8 @@ modules = Network.Core
         , Crypto.SHA256
         , Crypto.SCRAM
         , Crypto.Curve25519
+        , Crypto.ChaCha20
+        , Crypto.Poly1305
         , Helper
         , Data.PGBinary
         , Data.PGValue
