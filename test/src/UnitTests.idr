@@ -116,6 +116,16 @@ main = do
     ([0,0,0,16] ++ [0x04,0xd2,0x16,0x2e] ++ [0,0,0,42] ++ [0,0,0,99])
     (encode (CancelRequest 42 99))
 
+  checkFrame "CopyData (client-sent)" 0x64
+    (\payload => check "CopyData payload" (strBytes "1\thello\n") payload)
+    (encode (CopyData (strBytes "1\thello\n")))
+  check "CopyDone bytes" [0x63, 0, 0, 0, 4] (encode CopyDone)
+  checkFrame "CopyFail" 0x66
+    (\payload => case decodeCString payload of
+         Right ("oops", []) => putStrLn "OK CopyFail payload"
+         other => putStrLn ("FAIL CopyFail payload: " ++ show other))
+    (encode (CopyFail "oops"))
+
   -- decode: server-to-client messages
   check "decode AuthenticationOk" (Right (AuthenticationMsg AuthOk))
     (decode (MkFrameBytes [toByte AuthenticationTag] (encodeInt32 8) (encodeInt32 0)))
@@ -145,6 +155,17 @@ main = do
          check "decode ErrorResponse code" (Just "42601") (code e)
          check "decode ErrorResponse message" "syntax error" (message e)
        other => putStrLn ("FAIL decode ErrorResponse: " ++ show other)
+
+  check "decode CopyData (server-sent)" (Right (CopyData (strBytes "1\thello\n")))
+    (decode (MkFrameBytes [toByte CopyDataTag] (encodeInt32 12) (strBytes "1\thello\n")))
+  check "decode CopyDone" (Right CopyDone)
+    (decode (MkFrameBytes [toByte CopyDoneTag] (encodeInt32 4) []))
+  let copyOutPayload = [0] ++ encodeInt16 2 ++ encodeInt16 0 ++ encodeInt16 0
+  check "decode CopyOutResponse" (Right (CopyOutResponseMsg 0 [0, 0]))
+    (decode (MkFrameBytes [toByte CopyOutResponseTag] (encodeInt32 (cast (4 + length copyOutPayload))) copyOutPayload))
+  let copyInPayload = [0] ++ encodeInt16 1 ++ encodeInt16 0
+  check "decode CopyInResponse" (Right (CopyInResponseMsg 0 [0]))
+    (decode (MkFrameBytes [toByte CopyInResponseTag] (encodeInt32 (cast (4 + length copyInPayload))) copyInPayload))
 
   -- Data.PGValue parsers
   check "parsePGArray simple" (Right [Just "1", Just "2", Just "3"]) (parsePGArray "{1,2,3}")

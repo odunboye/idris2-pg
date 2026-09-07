@@ -159,11 +159,14 @@ CI (`.github/workflows/ci.yml`) runs both on every push/PR.
 - [x] Binary format for results (`queryRowsBinary`) — see "Value decoding"
       above for what's covered and its caveats. Sending binary-format
       parameters isn't implemented; parameters are always sent as text.
+- [x] The `COPY` protocol (`copyOut`/`copyIn`) — bulk export/import via
+      `COPY ... TO STDOUT`/`COPY ... FROM STDIN`, text format. `copyIn`
+      sends the whole payload as a single CopyData message rather than
+      chunking it.
 - [ ] SCRAM-SHA-256 auth — Postgres 14+'s default for new roles. Only
       trust/md5/cleartext are implemented; a role authenticating against this
       client needs `password_encryption = md5` (see above) or `trust`.
 - [ ] TLS/SSL — the underlying socket layer has no TLS support at all.
-- [ ] The `COPY` protocol — no bulk import/export.
 - [ ] Read/connect timeouts — a hung or unresponsive server can block a call
       indefinitely; there's no way to bound that today.
 - [ ] LISTEN/NOTIFY consumption — decoding works, but nothing exposes a way

@@ -177,6 +177,14 @@ decodeInt32List (S k) bs = do
   more <- decodeInt32List k rest
   Right (oid :: more)
 
+public export
+decodeInt16List : Nat -> Bytes -> Either String (List Int)
+decodeInt16List Z bs = Right []
+decodeInt16List (S k) bs = do
+  (v, rest) <- decodeInt16 bs
+  more <- decodeInt16List k rest
+  Right (v :: more)
+
 
 public export
 readFrameBit : (PGConnection Connected) -> IO (Either String FrameBytes)
@@ -303,6 +311,17 @@ encode Sync = [0x53] ++ encodeInt32 4  -- 'S', no payload
 encode (CancelRequest pgPid pgSecret) =
   encodeInt32 16 ++ encodeInt32 80877102 ++ encodeInt32 pgPid ++ encodeInt32 pgSecret
 
+encode (CopyData bytes) =
+  let len = 4 + length bytes
+  in [0x64] ++ encodeInt32 (cast len) ++ bytes  -- 'd'
+
+encode CopyDone = [0x63] ++ encodeInt32 4  -- 'c', no payload
+
+encode (CopyFail msg) =
+  let payload = encodeCString msg
+      len = 4 + length payload
+  in [0x66] ++ encodeInt32 (cast len) ++ payload  -- 'f'
+
 encode _ =  ?unimplementedEncode
 
 public export
@@ -383,6 +402,26 @@ decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do
             Left e => Left e
 
        QueryTag => Right (UnknownMsg QueryTag payload)
+
+       CopyDataTag => Right (CopyData payload)
+       CopyDoneTag => Right CopyDone
+
+       CopyOutResponseTag => case payload of
+            (fmtByte :: rest) => case decodeInt16 rest of
+                 Right (n, afterCount) => case decodeInt16List (cast n) afterCount of
+                      Right codes => Right (CopyOutResponseMsg (cast fmtByte) codes)
+                      Left e => Left e
+                 Left e => Left e
+            [] => Left "CopyOutResponse: empty payload"
+
+       CopyInResponseTag => case payload of
+            (fmtByte :: rest) => case decodeInt16 rest of
+                 Right (n, afterCount) => case decodeInt16List (cast n) afterCount of
+                      Right codes => Right (CopyInResponseMsg (cast fmtByte) codes)
+                      Left e => Left e
+                 Left e => Left e
+            [] => Left "CopyInResponse: empty payload"
+
        (UnknownTag str) => Right (UnknownMsg (UnknownTag str) payload)
 
 public export

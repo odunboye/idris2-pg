@@ -223,6 +223,70 @@ cancelQuery db = case map backendKey (result db) of
                 Right () => pure (Right ())
   _ => pure (Left (ProtocolError "no backend key available"))
 
+||| Runs a `COPY ... TO STDOUT` statement and returns the full copied data
+||| (assumed text format - the default) as one String. Uses the simple
+||| query protocol, same as any other unparameterized statement.
+public export
+copyOut : DB -> String -> IO (Either PGError String)
+copyOut db sql = do
+  resp <- send (MkConnected (socket (conn db))) (encode (QueryMsg (MkQuery sql)))
+  case resp of
+       Left err => pure (Left (ConnectionError err))
+       Right () => collect [] []
+  where
+    collect : List Bytes -> List Error -> IO (Either PGError String)
+    collect chunks errs = do
+      frame <- readFrame (conn db)
+      case frame of
+           Left err => pure (Left (ConnectionError err))
+           Right (CopyData chunk)     => collect (chunk :: chunks) errs
+           Right (ErrorMsg e)         => collect chunks (errs ++ [e])
+           Right (ReadyForQueryMsg _) =>
+             case errs of
+                  (e :: _) => pure (Left (SqlError e))
+                  []       => pure (Right (bytesToString (concat (reverse chunks))))
+           Right _ => collect chunks errs  -- CopyOutResponse/CopyDone/CommandComplete/etc: keep reading
+
+||| Runs a `COPY ... FROM STDIN` statement, sending `payload` (assumed
+||| already formatted as text-format COPY data - tab-separated columns,
+||| newline-separated rows) as a single CopyData message. Returns the
+||| command tag (e.g. "COPY 3") on success.
+public export
+copyIn : DB -> String -> String -> IO (Either PGError String)
+copyIn db sql payload = do
+  resp <- send (MkConnected (socket (conn db))) (encode (QueryMsg (MkQuery sql)))
+  case resp of
+       Left err => pure (Left (ConnectionError err))
+       Right () => waitForCopyIn
+  where
+    finish : List Error -> Maybe String -> IO (Either PGError String)
+    finish errs mTag = do
+      frame <- readFrame (conn db)
+      case frame of
+           Left err => pure (Left (ConnectionError err))
+           Right (ErrorMsg e)          => finish (errs ++ [e]) mTag
+           Right (CommandCompleteMsg t) => finish errs (Just t)
+           Right (ReadyForQueryMsg _) =>
+             case errs of
+                  (e :: _) => pure (Left (SqlError e))
+                  []       => pure (Right (fromMaybe "" mTag))
+           Right _ => finish errs mTag
+
+    waitForCopyIn : IO (Either PGError String)
+    waitForCopyIn = do
+      frame <- readFrame (conn db)
+      case frame of
+           Left err => pure (Left (ConnectionError err))
+           Right (CopyInResponseMsg _ _) => do
+             sendRes <- send (MkConnected (socket (conn db)))
+                          (encode (CopyData (stringToBytes payload)) ++ encode CopyDone)
+             case sendRes of
+                  Left err => pure (Left (ConnectionError err))
+                  Right () => finish [] Nothing
+           Right (ErrorMsg e)         => finish [e] Nothing
+           Right (ReadyForQueryMsg _) => pure (Left (ProtocolError "COPY FROM STDIN did not start (no CopyInResponse)"))
+           Right _                    => waitForCopyIn
+
 public export
 closeDB : DB -> IO ()
 closeDB (MkDB (MkPGConnection socket _) _ _ _ _ _) = do

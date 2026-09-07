@@ -50,6 +50,10 @@ data Tag
   | ReadyForQueryTag          -- 'Z'
   | RowDescriptionTag         -- 'T'
   | QueryTag                  -- 'Q'
+  | CopyDataTag               -- 'd'
+  | CopyDoneTag               -- 'c'
+  | CopyOutResponseTag        -- 'H'
+  | CopyInResponseTag         -- 'G'
   | UnknownTag String
 
 %runElab derive "Tag" [Show, Eq]
@@ -75,6 +79,10 @@ tagFromString s =
     "Z" => ReadyForQueryTag
     "T" => RowDescriptionTag
     "Q" => QueryTag
+    "d" => CopyDataTag
+    "c" => CopyDoneTag
+    "H" => CopyOutResponseTag
+    "G" => CopyInResponseTag
     _   => UnknownTag s
 
 public export
@@ -115,6 +123,10 @@ toByte ParameterDescriptionTag   = 0x74  -- 't'
 toByte ParseCompleteTag          = 0x31  -- '1'
 toByte PortalSuspendedTag        = 0x73  -- 's'
 toByte QueryTag                  = 0x51  -- 'Q'
+toByte CopyDataTag               = 0x64  -- 'd'
+toByte CopyDoneTag               = 0x63  -- 'c'
+toByte CopyOutResponseTag        = 0x48  -- 'H'
+toByte CopyInResponseTag         = 0x47  -- 'G'
 toByte (UnknownTag b)         = cast b
 
 public export
@@ -277,6 +289,15 @@ data PGMsg
   -- Not a normal tag-prefixed message: sent alone on a fresh connection to
   -- ask the server to cancel whatever the given backend is running.
   | CancelRequest Int Int                       -- backend PID, backend secret key
+  -- COPY protocol (bulk import/export). CopyData/CopyDone are bidirectional
+  -- (the client sends them for COPY FROM STDIN; the server sends them for
+  -- COPY TO STDOUT); CopyFail is client-only, the response messages are
+  -- server-only.
+  | CopyData Bytes
+  | CopyDone
+  | CopyFail String
+  | CopyOutResponseMsg Int (List Int)           -- overall format (0=text,1=binary), per-column format codes
+  | CopyInResponseMsg Int (List Int)
   | ReadyForQueryMsg  TxStatus
   | AuthenticationMsg PGAuthResponseTag
   | ErrorMsg Error

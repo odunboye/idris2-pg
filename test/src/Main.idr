@@ -299,6 +299,35 @@ testBinaryFormat db = do
   _ <- execCommand db "DROP TABLE binary_demo" []
   pure ()
 
+testCopy : DB -> IO ()
+testCopy db = do
+  Right _ <- execCommand db "CREATE TABLE copy_demo (id INT, name TEXT)" []
+    | Left err => putStrLn ("FAIL create copy_demo: " ++ displayError err)
+
+  -- COPY FROM STDIN: bulk-load two rows via one CopyData message
+  -- (tab-separated columns, newline-separated rows - text COPY format).
+  copyInTag <- copyIn db "COPY copy_demo (id, name) FROM STDIN" "1\tAlice\n2\tBob\n"
+  case copyInTag of
+       Left err => putStrLn ("FAIL copyIn: " ++ displayError err)
+       Right tag => putStrLn ("OK copyIn: " ++ tag)
+
+  Right rows <- queryRows db "SELECT id, name FROM copy_demo ORDER BY id" []
+    | Left err => putStrLn ("FAIL select after copyIn: " ++ displayError err)
+  case map (\r => (getInt r "id", getText r "name")) rows of
+       [(Right 1, Right "Alice"), (Right 2, Right "Bob")] =>
+         putStrLn "OK copyIn loaded the expected rows"
+       other => putStrLn ("FAIL copyIn rows: " ++ show other)
+
+  -- COPY TO STDOUT: export the same rows back out and check the raw
+  -- tab-separated text.
+  copyOutData <- copyOut db "COPY copy_demo (id, name) TO STDOUT"
+  case copyOutData of
+       Right "1\tAlice\n2\tBob\n" => putStrLn "OK copyOut exported the expected data"
+       other => putStrLn ("FAIL copyOut: " ++ show other)
+
+  _ <- execCommand db "DROP TABLE copy_demo" []
+  pure ()
+
 main : IO ()
 main = do
   cfg <- testConfig
@@ -314,5 +343,6 @@ main = do
   testNullHandling db
   testPreparedCache db
   testBinaryFormat db
+  testCopy db
   closeDB db
   putStrLn "OK done"
