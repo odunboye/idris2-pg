@@ -12,6 +12,8 @@ import Crypto.ChaCha20
 import Crypto.Poly1305
 import Crypto.ChaCha20Poly1305
 import Crypto.HKDF
+import Network.TLSWire
+import Network.TLSHandshake
 import Data.PGValue
 import Network.Timeout
 import System
@@ -419,6 +421,37 @@ main = do
     (toHex (deriveSecret tls_masterSecret "c ap traffic" tls_hash_full))
   check "TLS 1.3: server application traffic secret" (toHex tls_s_ap_traffic)
     (toHex (deriveSecret tls_masterSecret "s ap traffic" tls_hash_full))
+
+  -- Network.TLSHandshake, against RFC 8448's real ServerHello (parsing a
+  -- message this client didn't construct itself is the meaningful check;
+  -- an encode/decode round-trip of our own output can't catch a decoder
+  -- that's wrong in the same way its matching encoder is).
+  let rfcServerHelloBody = hexToBytes "0303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304"
+  case parseServerHello rfcServerHelloBody of
+       Nothing => putStrLn "FAIL parseServerHello: returned Nothing on a real ServerHello"
+       Just sh => do
+         check "parseServerHello: serverRandom" "a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e26928" (toHex (serverRandom sh))
+         check "parseServerHello: cipherSuite" 0x1301 (cipherSuite sh)
+         check "parseServerHello: serverPublicKey" "c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f" (toHex (serverPublicKey sh))
+
+  let rfcFullServerHello = hexToBytes "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304"
+  case decodeHandshakeMessage rfcFullServerHello of
+       Nothing => putStrLn "FAIL decodeHandshakeMessage: returned Nothing"
+       Just (ty, body, rest) => do
+         check "decodeHandshakeMessage: type" htServerHello ty
+         check "decodeHandshakeMessage: no trailing bytes" (the (List Bits8) []) rest
+         check "decodeHandshakeMessage: body matches" (toHex rfcServerHelloBody) (toHex body)
+
+  -- buildClientHello: self-consistency (own decoder round-trip) using the
+  -- same client random/pubkey RFC 8448 uses, so the inputs are at least
+  -- independently meaningful values rather than arbitrary test data.
+  let tlsClientRandom = hexToBytes "cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7"
+  let tlsClientPub = hexToBytes "99381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c"
+  case decodeHandshakeMessage (buildClientHello tlsClientRandom tlsClientPub) of
+       Nothing => putStrLn "FAIL buildClientHello: not decodable as a handshake message"
+       Just (ty, _, rest) => do
+         check "buildClientHello: type" htClientHello ty
+         check "buildClientHello: no trailing bytes" (the (List Bits8) []) rest
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True

@@ -1,0 +1,113 @@
+module Network.TLSHandshake
+
+-- Pure construction/parsing of the TLS 1.3 handshake messages this client
+-- needs (RFC 8446 section 4): ClientHello, ServerHello, and just enough
+-- of EncryptedExtensions/Certificate/CertificateVerify to skip over them
+-- (no certificate verification in this first landing - see README/
+-- Network.TLS's module comment for that scope decision), plus Finished.
+
+import Network.TLSWire
+import Crypto.Curve25519
+import Crypto.HKDF
+import Crypto.SCRAM
+import System.Random
+import Data.List
+import Data.Bits
+
+-- Cipher suite: TLS_CHACHA20_POLY1305_SHA256 (RFC 8446 Appendix B.4).
+public export
+cipherSuiteChaCha20Poly1305 : Nat
+cipherSuiteChaCha20Poly1305 = 0x1303
+
+randomByte : IO Bits8
+randomByte = cast <$> randomRIO {a = Int32} (0, 255)
+
+export
+randomBytes : Nat -> IO (List Bits8)
+randomBytes n = traverse (const randomByte) (replicate n ())
+
+extSupportedVersionsBody : Bytes
+extSupportedVersionsBody = [u8 2] ++ u16 0x0304  -- just TLS 1.3
+
+extSupportedGroupsBody : Bytes
+extSupportedGroupsBody = u16 2 ++ u16 groupX25519
+
+-- A minimal, standard set - ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256,
+-- rsa_pkcs1_sha256, ed25519 - enough for any common server certificate.
+-- Not used to verify anything yet (no signature verification), but RFC
+-- 8446 section 4.2.3 requires clients to send this extension regardless.
+extSignatureAlgorithmsBody : Bytes
+extSignatureAlgorithmsBody =
+  let schemes = concatMap u16 [0x0403, 0x0804, 0x0401, 0x0807]
+  in u16 (length schemes) ++ schemes
+
+extKeyShareBody : (clientPublicKey : Bytes) -> Bytes
+extKeyShareBody pubKey =
+  let entry = u16 groupX25519 ++ encodeVec16 pubKey
+  in encodeVec16 entry
+
+||| Builds a ClientHello handshake message (including the 1-byte type +
+||| 3-byte length header) offering only TLS_CHACHA20_POLY1305_SHA256 and
+||| an X25519 key share.
+export
+buildClientHello : (clientRandom : Bytes) -> (clientPublicKey : Bytes) -> Bytes
+buildClientHello clientRandom clientPublicKey =
+  let legacyVersion    = u16 0x0303
+      sessionId         = encodeVec8 []  -- empty; no middlebox-compat padding needed for a direct connection
+      cipherSuites      = encodeVec16 (u16 cipherSuiteChaCha20Poly1305)
+      compressionMethods = encodeVec8 [0]
+      extensions        = encodeVec16 $
+                             encodeExtension extSupportedVersions extSupportedVersionsBody
+                          ++ encodeExtension extSupportedGroups extSupportedGroupsBody
+                          ++ encodeExtension extSignatureAlgorithms extSignatureAlgorithmsBody
+                          ++ encodeExtension extKeyShare (extKeyShareBody clientPublicKey)
+      body = legacyVersion ++ clientRandom ++ sessionId ++ cipherSuites
+               ++ compressionMethods ++ extensions
+  in handshakeMessage htClientHello body
+
+uncons1 : Bytes -> Maybe (Bits8, Bytes)
+uncons1 (b :: rest) = Just (b, rest)
+uncons1 []          = Nothing
+
+public export
+record ParsedServerHello where
+  constructor MkParsedServerHello
+  serverRandom    : Bytes
+  cipherSuite     : Nat
+  serverPublicKey : Bytes
+
+||| Parses a ServerHello message BODY (not including the handshake header -
+||| the caller strips that via decodeHandshakeMessage first). Fails if the
+||| server didn't offer an x25519 key_share, or the message is malformed.
+export
+parseServerHello : Bytes -> Maybe ParsedServerHello
+parseServerHello body = do
+  (legacyVersion, r1)     <- decodeU16 body
+  let (serverRandom, r2)  = splitAt 32 r1
+  (sessionIdEcho, r3)     <- decodeVec8 r2
+  (cipherSuite, r4)       <- decodeU16 r3
+  (compressionMethod, r5) <- uncons1 r4
+  (extBytes, afterExts)   <- decodeVec16 r5
+  exts                    <- decodeExtensions extBytes
+  keyShareBody            <- findExtension extKeyShare exts
+  (group, ks1)            <- decodeU16 keyShareBody
+  (serverPublicKey, ks2)  <- decodeVec16 ks1
+  if group == groupX25519 && length serverPublicKey == 32 && length serverRandom == 32
+     then Just (MkParsedServerHello serverRandom cipherSuite serverPublicKey)
+     else Nothing
+
+||| RFC 8446 section 4.4.4's finished_key and the HMAC verify_data over a
+||| transcript hash - shared by both computing our own Finished (keyed on
+||| our own handshake traffic secret) and verifying the server's (keyed on
+||| theirs).
+export
+computeFinished : (trafficSecret : Bytes) -> (transcriptHash : Bytes) -> Bytes
+computeFinished trafficSecret transcriptHash =
+  let finishedKey = hkdfExpandLabel trafficSecret "finished" [] 32
+  in hmacSha256 finishedKey transcriptHash
+
+||| Builds a Finished handshake message (header + verify_data).
+export
+buildFinished : (trafficSecret : Bytes) -> (transcriptHash : Bytes) -> Bytes
+buildFinished trafficSecret transcriptHash =
+  handshakeMessage htFinished (computeFinished trafficSecret transcriptHash)

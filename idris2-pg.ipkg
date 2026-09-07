@@ -21,6 +21,8 @@ bugtracker = "https://github.com/odunboye/idris2-pg/issues"
 modules = Network.Core
         , Network.RawSocket
         , Network.Timeout
+        , Network.TLSWire
+        , Network.TLSHandshake
         , Data.PGTypes
         , Data.PGJson
         , Crypto.MD5
