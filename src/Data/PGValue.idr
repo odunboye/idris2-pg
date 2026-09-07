@@ -1,6 +1,7 @@
 module Data.PGValue
 
 import Data.PGTypes
+import public Data.PGJson
 import Data.List
 import Data.String
 import Derive.Prelude
@@ -260,7 +261,9 @@ getArray2D row colName = do
        PGGroup rows => traverse toLeafRow rows
        PGLeaf _     => Left "expected a 2D array, found a scalar"
 
--- JSON/JSONB: Postgres already returns these as plain text, so getText
--- already works for them - no dedicated accessor here. `libs/idris2-json`
--- exists locally in this workspace if a caller wants typed decoding; not
--- pulled in as a dependency here to keep this module dependency-free.
+||| Decodes a `json`/`jsonb` column via the minimal parser in Data.PGJson
+||| (JSONValue is re-exported from this module, so callers only need to
+||| import Data.PGValue).
+public export
+getJSON : Row -> String -> Either String JSONValue
+getJSON row colName = getText row colName >>= parseJSON

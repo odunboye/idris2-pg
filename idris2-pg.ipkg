@@ -20,6 +20,7 @@ bugtracker = "https://github.com/odunboye/idris2-pg/issues"
 modules = Network.Core
         , Network.RawSocket
         , Data.PGTypes
+        , Data.PGJson
         , Data.PGValue
         , Crypto.MD5
         , Helper

@@ -163,6 +163,19 @@ main = do
     (getTimestamp (MkRow [("ts", Just "2024-03-07 13:45:30")]) "ts")
   check "getTimestamp with fraction" (Right (MkPGTimestamp (MkPGDate 2024 3 7) 13 45 30))
     (getTimestamp (MkRow [("ts", Just "2024-03-07 13:45:30.123456")]) "ts")
+
+  -- JSON (Data.PGJson, via getJSON)
+  check "parseJSON null" (Right JNull) (parseJSON "null")
+  check "parseJSON number" (Right (JNumber 42.0)) (parseJSON "42")
+  check "parseJSON string with escapes" (Right (JString "a\"b\\c\nd")) (parseJSON "\"a\\\"b\\\\c\\nd\"")
+  check "parseJSON string with unicode escape" (Right (JString "caf\233")) (parseJSON "\"caf\\u00e9\"")
+  check "parseJSON array" (Right (JArray [JNumber 1.0, JNumber 2.0])) (parseJSON "[1,2]")
+  check "parseJSON nested object" (Right (JObject [("x", JArray [JObject [("y", JNull)]])]))
+    (parseJSON "{\"x\":[{\"y\":null}]}")
+  check "parseJSON whitespace tolerant" (Right (JObject [("a", JNumber 1.0)])) (parseJSON " { \"a\" : 1 } ")
+  check "parseJSON trailing content rejected" True (isLeft (parseJSON "1 2"))
+  check "parseJSON bad literal rejected" True (isLeft (parseJSON "nul"))
+  check "getJSON" (Right (JObject [("a", JNumber 1.0)])) (getJSON (MkRow [("j", Just "{\"a\":1}")]) "j")
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True

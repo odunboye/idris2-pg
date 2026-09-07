@@ -156,6 +156,16 @@ main = do
        Right [[Just "1", Just "2"], [Just "3", Just "4"]] => putStrLn "OK 2D array decodes correctly"
        other => putStrLn ("FAIL 2D array decode: " ++ show other)
 
+  -- JSONB decoding, against Postgres's actual output (which reformats/
+  -- reorders/normalizes the literal, so this checks structure, not text).
+  Right [jsonRow] <- queryRows db "SELECT '{\"a\":1,\"b\":[true,null,\"x\"]}'::jsonb AS j" []
+    | Left err => putStrLn ("FAIL select jsonb: " ++ displayError err)
+    | Right rs => putStrLn ("FAIL: unexpected row count for jsonb: " ++ show rs)
+  case getJSON jsonRow "j" of
+       Right (JObject [("a", JNumber 1.0), ("b", JArray [JBool True, JNull, JString "x"])]) =>
+         putStrLn "OK JSONB decodes correctly"
+       other => putStrLn ("FAIL JSONB decode: " ++ show other)
+
   -- cancelQuery: send a slow query on its own connection, then cancel it
   -- *before* reading the response - no client-side concurrency needed,
   -- since the cancellation races the server-side pg_sleep, not our client.

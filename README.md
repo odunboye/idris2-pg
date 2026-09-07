@@ -84,10 +84,11 @@ handling).
 
 `Data.PGValue` decodes a `Row`'s text-format columns on demand:
 `getText`, `getInt`, `getInteger` (arbitrary precision), `getDouble`,
-`getBool`, `getDate`/`getTimestamp` (`PGDate`/`PGTimestamp` records), and
-`getArray` (one-dimensional Postgres arrays, e.g. `int[]`/`text[]`). JSON and
-JSONB columns come back as plain text via `getText` — bring your own JSON
-library (e.g. the `json` package) to decode further if you need to.
+`getBool`, `getDate`/`getTimestamp` (`PGDate`/`PGTimestamp` records),
+`getArray`/`getArray2D`/`getNestedArray` (Postgres arrays of any
+dimensionality, via the `PGArrayValue` tree for anything beyond 2D), and
+`getJSON` (`json`/`jsonb` columns, via a small dependency-free JSON parser
+in `Data.PGJson` — no external JSON library needed).
 
 ### Errors
 
@@ -138,7 +139,9 @@ CI (`.github/workflows/ci.yml`) runs both on every push/PR.
 - [x] Transactions (`beginTx`/`commitTx`/`rollbackTx`/`withTransaction`, `txStatus`)
 - [x] Query cancellation (`cancelQuery`)
 - [x] NOTIFY payload decoding (see `Data.PGTypes.Notification`)
-- [x] Value decoding: text/int/bool/double/arbitrary-precision integer/date/timestamp/one-dimensional array (see "Value decoding" above)
+- [x] Value decoding: text/int/bool/double/arbitrary-precision integer/date/timestamp/array of any dimensionality/JSON (see "Value decoding" above)
+- [x] Prepared statement caching — a query text is Parsed once per
+      connection and reused on repeat calls (see `DB.stmtCache`).
 - [ ] SCRAM-SHA-256 auth — Postgres 14+'s default for new roles. Only
       trust/md5/cleartext are implemented; a role authenticating against this
       client needs `password_encryption = md5` (see above) or `trust`.
@@ -152,8 +155,3 @@ CI (`.github/workflows/ci.yml`) runs both on every push/PR.
       to `LISTEN` and then wait for/consume notifications without blocking
       on an unrelated query's response; that needs the read-timeout work
       above to do well.
-- [ ] Prepared statement caching — every parameterized call uses a fresh
-      unnamed statement/portal; nothing is cached or reused across calls.
-- [ ] Multi-dimensional arrays, JSON/JSONB typed decoding — arrays are
-      one-dimensional scalars only; JSON/JSONB come back as raw text (see
-      "Value decoding" above).
