@@ -120,5 +120,29 @@ main = do
 
   _ <- execCommand db "DROP TABLE tx_demo" []
 
+  -- Live checks for the fuller value typing (array/date/timestamp/numeric).
+  Right _ <- execCommand db
+    "CREATE TABLE types_demo (tags INT[], d DATE, ts TIMESTAMP, big NUMERIC)" []
+    | Left err => putStrLn ("FAIL create types_demo: " ++ displayError err)
+  Right _ <- execCommand db
+    "INSERT INTO types_demo VALUES ($1, $2, $3, $4)"
+    [ Just "{1,2,3}", Just "2024-03-07", Just "2024-03-07 13:45:30", Just "123456789012345678901234567890" ]
+    | Left err => putStrLn ("FAIL insert types_demo: " ++ displayError err)
+  Right [typesRow] <- queryRows db "SELECT tags, d, ts, big FROM types_demo" []
+    | Left err => putStrLn ("FAIL select types_demo: " ++ displayError err)
+    | Right rs => putStrLn ("FAIL: unexpected row count for types_demo: " ++ show rs)
+  let tagsResult = getArray typesRow "tags"
+  let dateResult = getDate typesRow "d"
+  let tsResult = getTimestamp typesRow "ts"
+  let bigResult = getInteger typesRow "big"
+  let allOk = tagsResult == Right [Just "1", Just "2", Just "3"]
+           && dateResult == Right (MkPGDate 2024 3 7)
+           && tsResult == Right (MkPGTimestamp (MkPGDate 2024 3 7) 13 45 30)
+           && bigResult == Right 123456789012345678901234567890
+  if allOk
+     then putStrLn "OK array/date/timestamp/numeric decode correctly"
+     else putStrLn ("FAIL types_demo decode: " ++ show (tagsResult, dateResult, tsResult, bigResult))
+  _ <- execCommand db "DROP TABLE types_demo" []
+
   closeDB db
   putStrLn "OK done"

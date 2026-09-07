@@ -97,3 +97,117 @@ getBool row colName = do
        "false" => Right False
        "0"     => Right False
        _       => Left ("Invalid boolean in " ++ colName ++ ": " ++ s)
+
+||| Arbitrary-precision, for `numeric`/`bigint` values that don't fit `Int`.
+public export
+getInteger : Row -> String -> Either String Integer
+getInteger row colName = do
+  s <- getText row colName
+  case parseInteger {a = Integer} s of
+       Nothing => Left ("Invalid integer in " ++ colName ++ ": " ++ s)
+       Just n  => Right n
+
+public export
+record PGDate where
+  constructor MkPGDate
+  year, month, day : Int
+%runElab derive "PGDate" [Show, Eq]
+
+public export
+record PGTimestamp where
+  constructor MkPGTimestamp
+  date : PGDate
+  hour, minute, second : Int
+%runElab derive "PGTimestamp" [Show, Eq]
+
+-- Parses Postgres's default "YYYY-MM-DD" date output. Returns whatever
+-- follows it too, so getTimestamp can reuse this for the date portion.
+parsePGDate : String -> Maybe (PGDate, String)
+parsePGDate s = case unpack s of
+     (y1::y2::y3::y4::'-'::mo1::mo2::'-'::d1::d2::rest) => do
+       y  <- parsePositive {a = Int} (pack [y1, y2, y3, y4])
+       mo <- parsePositive {a = Int} (pack [mo1, mo2])
+       d  <- parsePositive {a = Int} (pack [d1, d2])
+       Just (MkPGDate y mo d, pack rest)
+     _ => Nothing
+
+parsePGTime : String -> Maybe (Int, Int, Int)
+parsePGTime s = case unpack s of
+     (h1::h2::':'::mi1::mi2::':'::s1::s2::_) => do
+       h  <- parsePositive {a = Int} (pack [h1, h2])
+       mi <- parsePositive {a = Int} (pack [mi1, mi2])
+       se <- parsePositive {a = Int} (pack [s1, s2])
+       Just (h, mi, se)
+     _ => Nothing
+
+public export
+getDate : Row -> String -> Either String PGDate
+getDate row colName = do
+  s <- getText row colName
+  case parsePGDate s of
+       Just (d, _) => Right d
+       Nothing     => Left ("Invalid date in " ++ colName ++ ": " ++ s)
+
+||| Parses "YYYY-MM-DD HH:MI:SS[.ffffff][+TZ]" (Postgres's default text
+||| output for `timestamp`/`timestamptz`). Fractional seconds and any
+||| timezone offset suffix are parsed past but not retained - there's no
+||| timezone-aware type here.
+public export
+getTimestamp : Row -> String -> Either String PGTimestamp
+getTimestamp row colName = do
+  s <- getText row colName
+  case parsePGDate s of
+       Nothing => Left ("Invalid timestamp in " ++ colName ++ ": " ++ s)
+       Just (d, rest) => case parsePGTime (trim rest) of
+            Nothing            => Left ("Invalid timestamp in " ++ colName ++ ": " ++ s)
+            Just (h, mi, se) => Right (MkPGTimestamp d h mi se)
+
+-- Parses Postgres's canonical array text output ("{a,b,"c,d",NULL}") into a
+-- one-dimensional list of (possibly NULL) elements. Postgres always quotes
+-- an element that would otherwise be ambiguous with the NULL marker (or
+-- contain a comma/brace/backslash/quote/whitespace), so an *unquoted* NULL
+-- token unambiguously means a null element, never the literal text "NULL".
+-- Nested arrays (multiple dimensions) aren't handled.
+public export
+parsePGArray : String -> Either String (List (Maybe String))
+parsePGArray s =
+  case unpack s of
+       ('{' :: rest) =>
+         case reverse rest of
+              ('}' :: revBody) => case reverse revBody of
+                                        [] => Right []
+                                        body => scan body [] []
+              _                => Left "array value must end with '}'"
+       _ => Left "array value must start with '{'"
+  where
+    toElement : Bool -> List Char -> Maybe String
+    toElement wasQuoted cs =
+      let str = pack cs
+      in if not wasQuoted && str == "NULL" then Nothing else Just str
+
+    scan : List Char -> List Char -> List (Maybe String) -> Either String (List (Maybe String))
+    scanQuoted : List Char -> List Char -> List (Maybe String) -> Either String (List (Maybe String))
+    afterQuoted : List Char -> List Char -> List (Maybe String) -> Either String (List (Maybe String))
+
+    scan []              current acc = Right (reverse (toElement False current :: acc))
+    scan ('"' :: rest)   current acc = scanQuoted rest current acc
+    scan (',' :: rest)   current acc = scan rest [] (toElement False current :: acc)
+    scan (c :: rest)     current acc = scan rest (current ++ [c]) acc
+
+    scanQuoted []                    current acc = Left "unterminated quoted array element"
+    scanQuoted ('\\' :: c :: rest)   current acc = scanQuoted rest (current ++ [c]) acc
+    scanQuoted ('"' :: rest)         current acc = afterQuoted rest current acc
+    scanQuoted (c :: rest)           current acc = scanQuoted rest (current ++ [c]) acc
+
+    afterQuoted []            current acc = Right (reverse (toElement True current :: acc))
+    afterQuoted (',' :: rest) current acc = scan rest [] (toElement True current :: acc)
+    afterQuoted (_ :: rest)   current acc = afterQuoted rest current acc
+
+public export
+getArray : Row -> String -> Either String (List (Maybe String))
+getArray row colName = getText row colName >>= parsePGArray
+
+-- JSON/JSONB: Postgres already returns these as plain text, so getText
+-- already works for them - no dedicated accessor here. `libs/idris2-json`
+-- exists locally in this workspace if a caller wants typed decoding; not
+-- pulled in as a dependency here to keep this module dependency-free.
