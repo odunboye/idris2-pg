@@ -9,8 +9,8 @@ import Derive.Prelude
 test : String
 test = "Hello from Idris2!"
 
-mkDB : String -> String ->  Int -> IO (Either String DB)
-mkDB  user db port= do
+mkDB : String -> String -> String -> Int -> IO (Either String DB)
+mkDB  user password db port= do
          conn <- connectPG "" port
          case conn of
               Nothing =>  pure (Left "Could not connect")
@@ -21,7 +21,7 @@ mkDB  user db port= do
                      Nothing => pure (Left "Error sending StartupMsg")
                      (Just x) => do
                           let conx = (mkConnectedPG x)
-                          res <- handleStartupResponse conx 
+                          res <- handleStartupResponse user password conx
                           pure (Right (MkDB conx (Just res)))
 
 
@@ -39,6 +39,7 @@ queryDB db str = do
 --closeDB
 closeDB : DB -> IO ()
 closeDB (MkDB (MkPGConnection socket _) _) = do
+  _ <- send (MkConnected socket) (encode Terminate)
   _ <- close (MkConnected socket)
   pure ()
 
@@ -49,7 +50,7 @@ listTables = "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND ta
 
 testDrive : IO ()
 testDrive = do
-  db <- mkDB "root" "theideabankdb" 5432
+  db <- mkDB "root" "" "theideabankdb" 5432
   case db of
        (Left err) => putStrLn err
        (Right dbConn) => do 

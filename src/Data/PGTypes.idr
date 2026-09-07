@@ -93,13 +93,13 @@ public export
 data PGAuthResponseTag
   = AuthOk
   | AuthCleartext
-  | AuthMD5 String
+  | AuthMD5 Bytes
   | AuthSASL
   | AuthUnknown Int
 %runElab derive "PGAuthResponseTag" [Show]
 
 public export
-parseAuthResponse : Int -> String -> PGAuthResponseTag
+parseAuthResponse : Int -> Bytes -> PGAuthResponseTag
 parseAuthResponse i salt =
   case i of
     0  => AuthOk
@@ -224,6 +224,8 @@ public export
 data PGMsg
   = StartupMsg Int (List (String, String))
   | QueryMsg Query
+  | PasswordMessage String
+  | Terminate
   | ReadyForQueryMsg  TxStatus
   | AuthenticationMsg PGAuthResponseTag
   | ErrorMsg Error

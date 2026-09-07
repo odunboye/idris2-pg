@@ -7,6 +7,7 @@ import Data.Maybe
 import Data.PGTypes
 import Network.Core
 import Network.RawSocket
+import Crypto.MD5
 import Derive.Prelude
 
 
@@ -201,10 +202,18 @@ encode (StartupMsg proto params) =
       len = 4 + length payload
   in  encodeInt32 (cast len) ++ payload
 
-encode (QueryMsg query) = 
+encode (QueryMsg query) =
   let payload = encodeCString (body query)
       len = 4 + length payload
       in [toByte QueryTag] ++ encodeInt32 (cast len) ++ payload
+
+encode (PasswordMessage pw) =
+  let payload = encodeCString pw
+      len = 4 + length payload
+  in [0x70] ++ encodeInt32 (cast len) ++ payload  -- 'p'
+
+encode Terminate = [0x58] ++ encodeInt32 4  -- 'X', no payload
+
 encode _ =  ?unimplementedEncode
 
 public export
@@ -214,7 +223,7 @@ decode (MkFrameBytes (x :: xs) [] payload) = Left "Length is Empty"
 decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do
   case tagFromString (bytesToString [tag]) of
        AuthenticationTag => case decodeInt32 payload of
-            Right (authCode, _) => Right (AuthenticationMsg (parseAuthResponse authCode "someAutcode"))
+            Right (authCode, salt) => Right (AuthenticationMsg (parseAuthResponse authCode salt))
             Left e => Left e
 
        BackendKeyDataTag => case decodeInt32 payload of
@@ -316,24 +325,42 @@ startupstep acc _                     = acc
 
 
 public export
-handleStartupResponse : PGConnection Connected -> IO StartupResult
-handleStartupResponse conn = go init
+handleStartupResponse : (user : String) -> (password : String) -> PGConnection Connected -> IO StartupResult
+handleStartupResponse user password conn = go init
   where
     init : StartupResult
     init = MkStartupResult Nothing [] Nothing Nothing [] []
+
+    fail : StartupResult -> String -> StartupResult
+    fail acc msg = { errors := acc.errors ++ [MkError Nothing Nothing msg] } acc
+
+    sendPassword : StartupResult -> String -> IO StartupResult
+    sendPassword acc pw = do
+      res <- send (MkConnected (socket conn)) (encode (PasswordMessage pw))
+      case res of
+           Left err => pure (fail acc err)
+           Right () => pure acc
 
     go : StartupResult -> IO StartupResult
     go acc = do
       bs <- readFrame conn
       case bs of
-        Left err => pure ( { errors := acc.errors ++ [MkError Nothing Nothing err] } acc )
+        Left err => pure (fail acc err)
         Right msg =>
               case msg of
                 ReadyForQueryMsg r => pure ({ ready := Just (MkReadyForQuery r) } acc)
-                AuthenticationMsg AuthOk => go ({ authState := Just AuthOk }acc)
+                AuthenticationMsg AuthOk => go ({ authState := Just AuthOk } acc)
+                AuthenticationMsg AuthCleartext => do
+                  acc' <- sendPassword acc password
+                  go ({ authState := Just AuthCleartext } acc')
                 AuthenticationMsg (AuthMD5 salt) => do
-                  ?sendPw -- sendPassword net (computeMD5Password salt)
-                  go ({ authState := Just (AuthMD5 salt) } acc)
+                  let hashed = pgMD5Password password user salt
+                  acc' <- sendPassword acc hashed
+                  go ({ authState := Just (AuthMD5 salt) } acc')
+                AuthenticationMsg AuthSASL =>
+                  pure (fail acc "SCRAM-SHA-256 (SASL) authentication is not supported")
+                AuthenticationMsg (AuthUnknown n) =>
+                  pure (fail acc ("Unsupported authentication method: " ++ show n))
                 _                  => go (startupstep acc msg)
 
 
