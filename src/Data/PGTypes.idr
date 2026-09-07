@@ -244,6 +244,7 @@ data PGError
   = ConnectionError String
   | ProtocolError String
   | SqlError Error
+%runElab derive "PGError" [Show]
 
 public export
 displayError : PGError -> String
@@ -273,6 +274,9 @@ data PGMsg
   | Describe Char String                        -- 'S' (statement) or 'P' (portal), name
   | Execute String Int                          -- portal, max rows (0 = unlimited)
   | Sync
+  -- Not a normal tag-prefixed message: sent alone on a fresh connection to
+  -- ask the server to cancel whatever the given backend is running.
+  | CancelRequest Int Int                       -- backend PID, backend secret key
   | ReadyForQueryMsg  TxStatus
   | AuthenticationMsg PGAuthResponseTag
   | ErrorMsg Error
@@ -359,10 +363,20 @@ showQueryResult (MkQueryResult description rows commandTag status errors notices
 
 
 public export
+record PGConfig where
+  constructor MkPGConfig
+  host     : String
+  port     : Int
+  user     : String
+  password : String
+  database : String
+
+public export
 record DB where
   constructor MkDB
   conn    : PGConnection Connected
   result  : Maybe StartupResult
+  cfg     : PGConfig
   -- Updated after every query with the transaction status from its
   -- ReadyForQuery, so txStatus can report it without a round-trip.
   txState : IORef (Maybe TxStatus)

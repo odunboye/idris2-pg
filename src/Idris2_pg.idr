@@ -13,15 +13,6 @@ test : String
 test = "Hello from Idris2!"
 
 public export
-record PGConfig where
-  constructor MkPGConfig
-  host     : String
-  port     : Int
-  user     : String
-  password : String
-  database : String
-
-public export
 connectDB : PGConfig -> IO (Either PGError DB)
 connectDB cfg = do
   conn <- connectPG (host cfg) (port cfg)
@@ -41,7 +32,7 @@ connectDB cfg = do
                                       (e :: _) => pure (Left (SqlError e))
                                       []       => do
                                         ref <- newIORef (map status (ready sr))
-                                        pure (Right (MkDB conx (Just sr) ref))
+                                        pure (Right (MkDB conx (Just sr) cfg ref))
 
 -- Records the transaction status from a batch's final ReadyForQuery (the
 -- last result's, since a multi-statement batch shares one at the end) so
@@ -164,9 +155,28 @@ withTransaction db action = do
        Right _ => do _ <- commitTx db; pure result
        Left _  => do _ <- rollbackTx db; pure result
 
+||| Requests the server abort whatever this connection is currently running.
+||| Per the Postgres protocol, cancellation is out-of-band: this opens a
+||| fresh connection to send the CancelRequest on (no response is sent
+||| either way, so success here just means the request was delivered).
+public export
+cancelQuery : DB -> IO (Either PGError ())
+cancelQuery db = case map backendKey (result db) of
+  Just (Just bk) => do
+    conn <- connectPG (host (cfg db)) (port (cfg db))
+    case conn of
+         Nothing => pure (Left (ConnectionError "could not open cancel connection"))
+         Just cancelConn => do
+           sendRes <- send (MkConnected (socket cancelConn)) (encode (CancelRequest (pid bk) (secret bk)))
+           _ <- close (MkConnected (socket cancelConn))
+           case sendRes of
+                Left err => pure (Left (ConnectionError err))
+                Right () => pure (Right ())
+  _ => pure (Left (ProtocolError "no backend key available"))
+
 public export
 closeDB : DB -> IO ()
-closeDB (MkDB (MkPGConnection socket _) _ _) = do
+closeDB (MkDB (MkPGConnection socket _) _ _ _) = do
   _ <- send (MkConnected socket) (encode Terminate)
   _ <- close (MkConnected socket)
   pure ()

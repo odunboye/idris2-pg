@@ -254,6 +254,10 @@ encode (Execute portal maxRows) =
 
 encode Sync = [0x53] ++ encodeInt32 4  -- 'S', no payload
 
+-- No tag byte: just length(=16), the fixed cancel-request magic code, pid, secret.
+encode (CancelRequest pgPid pgSecret) =
+  encodeInt32 16 ++ encodeInt32 80877102 ++ encodeInt32 pgPid ++ encodeInt32 pgSecret
+
 encode _ =  ?unimplementedEncode
 
 public export

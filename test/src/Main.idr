@@ -6,6 +6,9 @@ import System
 import Idris2_pg
 import Data.PGTypes
 import Data.PGValue
+import Helper
+import Network.Core
+import Network.RawSocket
 
 -- CRUD smoke test against a real Postgres server. Connection details come
 -- from environment variables so this isn't hardcoded to one local setup;
@@ -143,6 +146,29 @@ main = do
      then putStrLn "OK array/date/timestamp/numeric decode correctly"
      else putStrLn ("FAIL types_demo decode: " ++ show (tagsResult, dateResult, tsResult, bigResult))
   _ <- execCommand db "DROP TABLE types_demo" []
+
+  -- cancelQuery: send a slow query on its own connection, then cancel it
+  -- *before* reading the response - no client-side concurrency needed,
+  -- since the cancellation races the server-side pg_sleep, not our client.
+  Right dbSlow <- connectDB cfg
+    | Left err => putStrLn ("FAIL connect for cancel test: " ++ displayError err)
+  let slowFrame = encode (Parse "" "SELECT pg_sleep(2)" [])
+                    ++ encode (Bind "" "" [])
+                    ++ encode (Describe 'P' "")
+                    ++ encode (Execute "" 0)
+                    ++ encode Sync
+  _ <- send (MkConnected (socket (conn dbSlow))) slowFrame
+  cancelResult <- cancelQuery dbSlow
+  case cancelResult of
+       Left err => putStrLn ("FAIL cancelQuery: " ++ displayError err)
+       Right () => do
+         slowResponse <- handleQueryResponses dbSlow
+         case slowResponse of
+              Right [qr] => case errors qr of
+                                 (e :: _) => putStrLn ("OK cancelQuery aborted the slow query: " ++ message e)
+                                 []       => putStrLn "FAIL: slow query completed normally (not cancelled)"
+              other => putStrLn ("FAIL: unexpected response to cancelled query: " ++ show other)
+  closeDB dbSlow
 
   closeDB db
   putStrLn "OK done"
