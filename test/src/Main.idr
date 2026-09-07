@@ -377,6 +377,42 @@ testTLS cfg = do
                    (Right 1, Right "hello over tls") => putStrLn "OK TLS handshake, SCRAM auth, and query all succeeded"
                    other => putStrLn ("FAIL TLS query result: " ++ show other)
               Right other => putStrLn ("FAIL TLS query: expected one row, got " ++ show (length other))
+
+         -- The extended query protocol (Parse/Bind/Describe/Execute/Sync)
+         -- is a structurally different wire path from the simple query
+         -- above - worth exercising separately over TLS, and running it
+         -- twice checks the prepared-statement cache too.
+         pres1 <- queryRows db "SELECT $1::int + $2::int AS sum" [Just "2", Just "3"]
+         pres2 <- queryRows db "SELECT $1::int + $2::int AS sum" [Just "10", Just "20"]
+         case (pres1, pres2) of
+              (Right [r1], Right [r2]) => case (getInt r1 "sum", getInt r2 "sum") of
+                   (Right 5, Right 30) => putStrLn "OK TLS parameterized query (and prepared statement reuse)"
+                   other => putStrLn ("FAIL TLS parameterized query result: " ++ show other)
+              other => putStrLn ("FAIL TLS parameterized query: " ++ show (map (map length) other))
+
+         -- cancelQuery opens its own fresh out-of-band connection, which
+         -- also negotiates its own independent TLS handshake - a
+         -- genuinely different code path from the main connection above.
+         let slowFrame = encode (Parse "" "SELECT pg_sleep(2)" [])
+                           ++ encode (Bind "" "" [] False)
+                           ++ encode (Describe 'P' "")
+                           ++ encode (Execute "" 0)
+                           ++ encode Sync
+         sendRes <- pgSend (conn db) slowFrame
+         case sendRes of
+              Left err => putStrLn ("FAIL TLS cancelQuery setup: " ++ err)
+              Right () => do
+                cancelResult <- cancelQuery db
+                case cancelResult of
+                     Left err => putStrLn ("FAIL TLS cancelQuery: " ++ displayError err)
+                     Right () => do
+                       slowResponse <- handleQueryResponses db
+                       case slowResponse of
+                            Right [qr] => case errors qr of
+                                 (e :: _) => putStrLn ("OK TLS cancelQuery aborted the slow query: " ++ message e)
+                                 []       => putStrLn "FAIL: slow query completed normally over TLS (not cancelled)"
+                            other => putStrLn ("FAIL TLS cancelQuery response: " ++ show other)
+
          closeDB db
 
 main : IO ()
