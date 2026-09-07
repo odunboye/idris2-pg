@@ -162,50 +162,103 @@ getTimestamp row colName = do
             Nothing            => Left ("Invalid timestamp in " ++ colName ++ ": " ++ s)
             Just (h, mi, se) => Right (MkPGTimestamp d h mi se)
 
--- Parses Postgres's canonical array text output ("{a,b,"c,d",NULL}") into a
--- one-dimensional list of (possibly NULL) elements. Postgres always quotes
--- an element that would otherwise be ambiguous with the NULL marker (or
--- contain a comma/brace/backslash/quote/whitespace), so an *unquoted* NULL
--- token unambiguously means a null element, never the literal text "NULL".
--- Nested arrays (multiple dimensions) aren't handled.
+||| Postgres's canonical array text output ("{a,b,"c,d",NULL}") parses into
+||| this tree: a leaf is a scalar element (Nothing for an unquoted NULL
+||| marker), a group is one level of "{...}" nesting - so an N-dimensional
+||| array is N groups deep, each holding the next level's groups/leaves.
+public export
+data PGArrayValue = PGLeaf (Maybe String) | PGGroup (List PGArrayValue)
+%runElab derive "PGArrayValue" [Show, Eq]
+
+-- A recursive-descent parser (rather than the flat single-pass scan a
+-- one-dimensional-only version could use), since correctly matching nested
+-- "{...}" groups needs real recursion, not just quote-tracking.
+--
+-- Postgres always quotes an element that would otherwise be ambiguous with
+-- the NULL marker (or contain a comma/brace/backslash/quote/whitespace), so
+-- an *unquoted* NULL token unambiguously means a null element, never the
+-- literal text "NULL".
+toElement : Bool -> List Char -> Maybe String
+toElement wasQuoted cs =
+  let str = pack cs
+  in if not wasQuoted && str == "NULL" then Nothing else Just str
+
+parseValue : List Char -> Either String (PGArrayValue, List Char)
+parseGroup : List Char -> List PGArrayValue -> Either String (PGArrayValue, List Char)
+parseScalar : List Char -> Either String (PGArrayValue, List Char)
+parseQuoted : List Char -> List Char -> Either String (PGArrayValue, List Char)
+spanScalar : List Char -> (List Char, List Char)
+
+parseValue ('{' :: rest) = parseGroup rest []
+parseValue cs            = parseScalar cs
+
+parseGroup ('}' :: rest) acc = Right (PGGroup (reverse acc), rest)
+parseGroup cs            acc = do
+  (v, rest) <- parseValue cs
+  case rest of
+       (',' :: rest') => parseGroup rest' (v :: acc)
+       ('}' :: rest') => Right (PGGroup (reverse (v :: acc)), rest')
+       _              => Left "expected ',' or '}' in array"
+
+parseScalar ('"' :: rest) = parseQuoted rest []
+parseScalar cs            = let (chars, rest) = spanScalar cs
+                             in Right (PGLeaf (toElement False chars), rest)
+
+parseQuoted []                  acc = Left "unterminated quoted array element"
+parseQuoted ('\\' :: c :: rest) acc = parseQuoted rest (acc ++ [c])
+parseQuoted ('"' :: rest)       acc = Right (PGLeaf (toElement True acc), rest)
+parseQuoted (c :: rest)         acc = parseQuoted rest (acc ++ [c])
+
+spanScalar []                       = ([], [])
+spanScalar (c :: cs) =
+  if c == ',' || c == '}'
+     then ([], c :: cs)
+     else let (more, rest) = spanScalar cs in (c :: more, rest)
+
+||| Parses any Postgres array text output, of any dimensionality.
+public export
+parsePGArrayValue : String -> Either String PGArrayValue
+parsePGArrayValue s = case unpack s of
+     ('{' :: rest) => case parseGroup rest [] of
+          Right (v, []) => Right v
+          Right (_, _)  => Left "trailing content after array value"
+          Left err      => Left err
+     _ => Left "array value must start with '{'"
+
+public export
+getNestedArray : Row -> String -> Either String PGArrayValue
+getNestedArray row colName = getText row colName >>= parsePGArrayValue
+
+toLeaf : PGArrayValue -> Either String (Maybe String)
+toLeaf (PGLeaf x)   = Right x
+toLeaf (PGGroup _)  = Left "expected a scalar, found a nested array"
+
+toLeafRow : PGArrayValue -> Either String (List (Maybe String))
+toLeafRow (PGGroup xs) = traverse toLeaf xs
+toLeafRow (PGLeaf _)   = Left "expected a nested array, found a scalar"
+
+||| One-dimensional array, e.g. `int[]`/`text[]`. Errors clearly if the
+||| value actually has more than one dimension, rather than misparsing it.
 public export
 parsePGArray : String -> Either String (List (Maybe String))
-parsePGArray s =
-  case unpack s of
-       ('{' :: rest) =>
-         case reverse rest of
-              ('}' :: revBody) => case reverse revBody of
-                                        [] => Right []
-                                        body => scan body [] []
-              _                => Left "array value must end with '}'"
-       _ => Left "array value must start with '{'"
-  where
-    toElement : Bool -> List Char -> Maybe String
-    toElement wasQuoted cs =
-      let str = pack cs
-      in if not wasQuoted && str == "NULL" then Nothing else Just str
-
-    scan : List Char -> List Char -> List (Maybe String) -> Either String (List (Maybe String))
-    scanQuoted : List Char -> List Char -> List (Maybe String) -> Either String (List (Maybe String))
-    afterQuoted : List Char -> List Char -> List (Maybe String) -> Either String (List (Maybe String))
-
-    scan []              current acc = Right (reverse (toElement False current :: acc))
-    scan ('"' :: rest)   current acc = scanQuoted rest current acc
-    scan (',' :: rest)   current acc = scan rest [] (toElement False current :: acc)
-    scan (c :: rest)     current acc = scan rest (current ++ [c]) acc
-
-    scanQuoted []                    current acc = Left "unterminated quoted array element"
-    scanQuoted ('\\' :: c :: rest)   current acc = scanQuoted rest (current ++ [c]) acc
-    scanQuoted ('"' :: rest)         current acc = afterQuoted rest current acc
-    scanQuoted (c :: rest)           current acc = scanQuoted rest (current ++ [c]) acc
-
-    afterQuoted []            current acc = Right (reverse (toElement True current :: acc))
-    afterQuoted (',' :: rest) current acc = scan rest [] (toElement True current :: acc)
-    afterQuoted (_ :: rest)   current acc = afterQuoted rest current acc
+parsePGArray s = do
+  v <- parsePGArrayValue s
+  case v of
+       PGGroup xs => traverse toLeaf xs
+       PGLeaf _   => Left "expected an array, found a scalar"
 
 public export
 getArray : Row -> String -> Either String (List (Maybe String))
 getArray row colName = getText row colName >>= parsePGArray
+
+||| Two-dimensional array, e.g. `int[][]`: a list of rows of scalars.
+public export
+getArray2D : Row -> String -> Either String (List (List (Maybe String)))
+getArray2D row colName = do
+  v <- getNestedArray row colName
+  case v of
+       PGGroup rows => traverse toLeafRow rows
+       PGLeaf _     => Left "expected a 2D array, found a scalar"
 
 -- JSON/JSONB: Postgres already returns these as plain text, so getText
 -- already works for them - no dedicated accessor here. `libs/idris2-json`

@@ -133,6 +133,23 @@ main = do
   check "parsePGArray quoted NULL literal" (Right [Just "NULL"]) (parsePGArray "{\"NULL\"}")
   check "parsePGArray bad format" (Left "array value must start with '{'") (parsePGArray "1,2,3")
 
+  -- multi-dimensional arrays (PGArrayValue / getArray2D)
+  check "parsePGArrayValue 2D"
+    (Right (PGGroup [PGGroup [PGLeaf (Just "1"), PGLeaf (Just "2")], PGGroup [PGLeaf (Just "3"), PGLeaf (Just "4")]]))
+    (parsePGArrayValue "{{1,2},{3,4}}")
+  check "parsePGArrayValue 2D with null and quoted comma"
+    (Right (PGGroup [PGGroup [PGLeaf Nothing, PGLeaf (Just "a,b")]]))
+    (parsePGArrayValue "{{NULL,\"a,b\"}}")
+  check "parsePGArrayValue 3D"
+    (Right (PGGroup [PGGroup [PGGroup [PGLeaf (Just "1")], PGGroup [PGLeaf (Just "2")]]]))
+    (parsePGArrayValue "{{{1},{2}}}")
+  check "parsePGArray on a 2D value reports a clear error" True
+    (isLeft (parsePGArray "{{1,2},{3,4}}"))
+  check "getArray2D" (Right [[Just "1", Just "2"], [Just "3", Just "4"]])
+    (getArray2D (MkRow [("m", Just "{{1,2},{3,4}}")]) "m")
+  check "getArray2D on a 1D value reports a clear error" True
+    (isLeft (getArray2D (MkRow [("m", Just "{1,2}")]) "m"))
+
   check "getInt ok" (Right 42) (getInt (MkRow [("n", Just "42")]) "n")
   check "getInt bad" True (isLeft (getInt (MkRow [("n", Just "abc")]) "n"))
   check "getInt null" True (isLeft (getInt (MkRow [("n", Nothing)]) "n"))

@@ -148,6 +148,14 @@ main = do
      else putStrLn ("FAIL types_demo decode: " ++ show (tagsResult, dateResult, tsResult, bigResult))
   _ <- execCommand db "DROP TABLE types_demo" []
 
+  -- Multi-dimensional array decoding, against Postgres's actual 2D output.
+  Right [twoDRow] <- queryRows db "SELECT ARRAY[[1,2],[3,4]] AS m" []
+    | Left err => putStrLn ("FAIL select 2D array: " ++ displayError err)
+    | Right rs => putStrLn ("FAIL: unexpected row count for 2D array: " ++ show rs)
+  case getArray2D twoDRow "m" of
+       Right [[Just "1", Just "2"], [Just "3", Just "4"]] => putStrLn "OK 2D array decodes correctly"
+       other => putStrLn ("FAIL 2D array decode: " ++ show other)
+
   -- cancelQuery: send a slow query on its own connection, then cancel it
   -- *before* reading the response - no client-side concurrency needed,
   -- since the cancellation races the server-side pg_sleep, not our client.
