@@ -346,22 +346,9 @@ readFrame conn = do
   frameRes <- readFrameBit conn
   case frameRes of
        (Left err) => pure (Left err)
-       (Right frameBytes) => do
-         --let bytes = frameBytesToList frameBytes
-         case (decode frameBytes) of
+       (Right frameBytes) => case (decode frameBytes) of
              (Left err) => pure (Left err)
              (Right msg) => pure (Right msg)
-
-
-public export
-waitForReady : Nat -> PGConnection Connected -> IO (Either String  (PGConnection Ready))
-waitForReady Z conn = pure (Left "Error: exceeded maximum message depth before ReadyForQuery")
-waitForReady(S k) conn = do
-  frameRes <- readFrame conn
-  case frameRes of
-       (Left err) => pure (Left err)
-       (Right (ReadyForQueryMsg c)) => pure (Right (MkPGConnection (socket conn) []))
-       (Right _) => waitForReady k conn
 
 
 startupstep : StartupResult -> PGMsg -> StartupResult

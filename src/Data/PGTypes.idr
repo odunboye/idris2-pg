@@ -10,19 +10,10 @@ import Network.Core
 %default total
 
 public export
-data Role = Client | Server
-
-public export
-data PGFormat = Text | Binary
-
-public export
 data PGState
   = Disconnected
   | Connected
   | StartupSent
-  | Authenticating
-  | Ready
-  | Querying
   | Closed
 
 public export
@@ -35,10 +26,6 @@ record PGConnection (state : PGState) where
 public export
 mkConnectedPG : (PGConnection StartupSent) -> (PGConnection Connected)
 mkConnectedPG (MkPGConnection socket params) = MkPGConnection socket params
-
-public export
-mkConnectedFromReady : (PGConnection Ready) -> (PGConnection Connected)
-mkConnectedFromReady  (MkPGConnection socket params) = MkPGConnection socket params
 
 public export
 Bytes : Type
@@ -269,9 +256,6 @@ record Query  where
   body : String
 %runElab derive "Query" [Show, Eq]
 
-CommandComplete : Type
-CommandComplete = String
-
 public export
 data PGMsg
   = StartupMsg Int (List (String, String))
@@ -318,18 +302,6 @@ record FrameBytes where
 %runElab derive "FrameBytes" [Show, Eq]
 
 
-public export
-frameBytesToList : FrameBytes -> Bytes
-frameBytesToList (MkFrameBytes tag len payload) = tag ++ len ++ payload
-
-
-public export
-record Frame where
-  constructor MkFrame
-  tag : Tag
-  len : Int
-  payload : Bytes
-%runElab derive "Frame" [Show, Eq]
 
 
 public export

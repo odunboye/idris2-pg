@@ -9,9 +9,6 @@ import Network.Core
 import Network.RawSocket
 import Derive.Prelude
 
-test : String
-test = "Hello from Idris2!"
-
 public export
 connectDB : PGConfig -> IO (Either PGError DB)
 connectDB cfg = do
@@ -180,17 +177,3 @@ closeDB (MkDB (MkPGConnection socket _) _ _ _) = do
   _ <- send (MkConnected socket) (encode Terminate)
   _ <- close (MkConnected socket)
   pure ()
-
-testDrive : IO ()
-testDrive = do
-  let cfg = MkPGConfig "127.0.0.1" 5432 "root" "" "theideabankdb"
-  db <- connectDB cfg
-  case db of
-       (Left err) => putStrLn (displayError err)
-       (Right dbConn) => do
-         _ <- showStartUpResult (result dbConn)
-         some <- queryRows dbConn "select * from role" []
-         case some of
-              (Left err) => putStrLn (displayError err)
-              (Right rows) => printLn rows
-         closeDB dbConn
