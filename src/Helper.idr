@@ -109,19 +109,19 @@ public export
 readFrameBit : (PGConnection Connected) -> IO (Either String FrameBytes)
 readFrameBit conn = do
   let connx = (MkConnected (socket conn))
-  msgTypeResp <- receive connx 1
-  case msgTypeResp of 
+  msgTypeResp <- receiveExact connx 1
+  case msgTypeResp of
        (Left x) => pure (Left x)
        (Right tagByte) => do
-          lenRes <- receive connx 4
-          case lenRes of 
+          lenRes <- receiveExact connx 4
+          case lenRes of
               (Left x) => pure (Left x)
               (Right lenList) => do
-                    let vect = toVect 4 lenList 
+                    let vect = toVect 4 lenList
                     case vect of
                          Nothing => pure (Left "Error parsing length")
                          (Just lenVect) => do
-                           payloadRes <- receive connx ((toInt lenVect) - 4)
+                           payloadRes <- receiveExact connx ((toInt lenVect) - 4)
                            case payloadRes of
                                 (Left y) => pure (Left y)
                                 (Right y) => pure (Right(MkFrameBytes tagByte lenList y))
