@@ -5,6 +5,7 @@ import Data.Bits
 import Data.PGTypes
 import Helper
 import Crypto.MD5
+import Crypto.SHA256
 import Crypto.SCRAM
 import Crypto.Curve25519
 import Crypto.ChaCha20
@@ -362,6 +363,62 @@ main = do
   let hkdfContext3 = hexToBytes "d1f71bbd8250b0947cfcd0d730980939911ac0706117dc54895c4077c0a4ee7f"
   check "hkdfExpandLabel (RFC 8446 HkdfLabel struct)" "94843d3f863bd550652c2a3cdfc82925c503be2e618cd71832f48a63cc83de86"
     (toHex (hkdfExpandLabel hkdfSecret3 "c hs traffic" hkdfContext3 32))
+
+  -- Crypto.Curve25519 + Crypto.SHA256 + Crypto.HKDF, wired together as
+  -- TLS 1.3's key schedule (RFC 8446 section 7.1), against RFC 8448's
+  -- official "Simple 1-RTT Handshake" example - the exact ClientHello/
+  -- ServerHello bytes, ephemeral X25519 keys, and every intermediate
+  -- secret IETF published, all in one chain: the ECDHE shared secret
+  -- feeds the early secret, which derives the handshake secret (salted by
+  -- a "derived" secret over the empty-string hash), which derives the
+  -- client/server handshake traffic secrets and (via another "derived")
+  -- the master secret, which derives both application traffic secrets.
+  -- A bug anywhere in this chain - X25519, HKDF-Extract, HKDF-Expand-
+  -- Label's struct encoding, or the label/context wiring between steps -
+  -- would show up as a mismatch somewhere in this list.
+  let tls_client_priv = hexToBytes "49af42ba7f7994852d713ef2784bcbcaa7911de26adc5642cb634540e7ea5005"
+  let tls_client_pub = hexToBytes "99381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c"
+  let tls_server_priv = hexToBytes "b1580eeadf6dd589b8ef4f2d5652578cc810e9980191ec8d058308cea216a21e"
+  let tls_server_pub = hexToBytes "c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f"
+  let tls_client_hello = hexToBytes "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001"
+  let tls_server_hello = hexToBytes "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304"
+  let tls_early_secret = hexToBytes "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a"
+  let tls_handshake_ikm = hexToBytes "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d"
+  let tls_handshake_secret = hexToBytes "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac"
+  let tls_c_hs_traffic = hexToBytes "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21"
+  let tls_s_hs_traffic = hexToBytes "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38"
+  let tls_master_secret = hexToBytes "18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919"
+  let tls_c_ap_traffic = hexToBytes "9e40646ce79a7f9dc05af8889bce6552875afa0b06df0087f792ebb7c17504a5"
+  let tls_s_ap_traffic = hexToBytes "a11af9f05531f856ad47116b45a950328204b4f44bfb6b3a4b4f1f3fcb631643"
+  let tls_hash_ch_sh = hexToBytes "860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8"
+  let tls_hash_empty = hexToBytes "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  let tls_server_finished = hexToBytes "9b9b141d906337fbd2cbdce71df4deda4ab42c309572cb7fffee5454b78f0718"
+  let tls_client_finished = hexToBytes "a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61"
+  let tls_hash_full = hexToBytes "9608102a0f1ccc6db6250b7b7e417b1a000eaada3daae4777a7686c9ff83df13"
+  check "TLS 1.3: client-computed ECDHE shared secret" (toHex tls_handshake_ikm) (toHex (x25519 tls_client_priv tls_server_pub))
+  check "TLS 1.3: server-computed ECDHE shared secret" (toHex tls_handshake_ikm) (toHex (x25519 tls_server_priv tls_client_pub))
+  check "TLS 1.3: transcript hash (ClientHello||ServerHello)" (toHex tls_hash_ch_sh) (toHex (sha256 (tls_client_hello ++ tls_server_hello)))
+  check "TLS 1.3: sha256 of the empty string" (toHex tls_hash_empty) (toHex (sha256 []))
+
+  let tls_zero32 = replicate 32 0
+  let tls_earlySecret = hkdfExtract tls_zero32 tls_zero32
+  check "TLS 1.3: early secret" (toHex tls_early_secret) (toHex tls_earlySecret)
+
+  let tls_derived1 = deriveSecret tls_earlySecret "derived" tls_hash_empty
+  let tls_handshakeSecret = hkdfExtract tls_derived1 tls_handshake_ikm
+  check "TLS 1.3: handshake secret" (toHex tls_handshake_secret) (toHex tls_handshakeSecret)
+  check "TLS 1.3: client handshake traffic secret" (toHex tls_c_hs_traffic)
+    (toHex (deriveSecret tls_handshakeSecret "c hs traffic" tls_hash_ch_sh))
+  check "TLS 1.3: server handshake traffic secret" (toHex tls_s_hs_traffic)
+    (toHex (deriveSecret tls_handshakeSecret "s hs traffic" tls_hash_ch_sh))
+
+  let tls_derived2 = deriveSecret tls_handshakeSecret "derived" tls_hash_empty
+  let tls_masterSecret = hkdfExtract tls_derived2 tls_zero32
+  check "TLS 1.3: master secret" (toHex tls_master_secret) (toHex tls_masterSecret)
+  check "TLS 1.3: client application traffic secret" (toHex tls_c_ap_traffic)
+    (toHex (deriveSecret tls_masterSecret "c ap traffic" tls_hash_full))
+  check "TLS 1.3: server application traffic secret" (toHex tls_s_ap_traffic)
+    (toHex (deriveSecret tls_masterSecret "s ap traffic" tls_hash_full))
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True
