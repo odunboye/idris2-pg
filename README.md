@@ -279,7 +279,7 @@ live testing as described here.
       — use a connection dedicated to listening, since `waitForNotification`
       blocks it until a notification arrives; it can't run other queries
       meanwhile; that wait can be bounded with `readTimeoutMs` (see
-      "Timeouts" below).
+      "Timeouts" above).
 - [x] Read/connect timeouts (`PGConfig.connectTimeoutMs`/`readTimeoutMs`) —
       cooperative, thread-based (`Network.Timeout`), not OS-level socket
       timeouts; see "Timeouts" above for exactly what that does and
@@ -290,5 +290,5 @@ live testing as described here.
       (`Crypto.ChaCha20`/`Crypto.Poly1305`/`Crypto.ChaCha20Poly1305`), the
       HKDF-based key schedule (`Crypto.HKDF`), and the handshake state
       machine (`Network.TLS`/`Network.TLSHandshake`/`Network.TLSWire`).
-      See "TLS" below for what this does and doesn't protect against, and
+      See "TLS" above for what this does and doesn't protect against, and
       why P-256 (not X25519) is what's actually negotiated on the wire.
