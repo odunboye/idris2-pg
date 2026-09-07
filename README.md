@@ -4,6 +4,28 @@ A PostgreSQL client for Idris2, implemented from scratch against the
 [Postgres wire protocol](https://www.postgresql.org/docs/current/protocol.html)
 over raw TCP sockets — no `libpq`, no FFI.
 
+## Project goals
+
+The main goal of this project is a **fully verified** Postgres client: one
+where Idris2's dependent types are used to *prove* protocol-level
+correctness properties at compile time, not just exercise them with tests —
+an encode/decode pair proven to round-trip, a connection state machine the
+compiler actually enforces rather than only labels, length-indexed buffers
+that turn a short read or a frame overrun into a type error instead of a
+runtime one, and so on. That work happens on the
+[`verified`](https://github.com/odunboye/idris2-pg/tree/verified) branch,
+and is meant as a demonstration of what dependent types buy you in a real,
+non-toy client for a real wire protocol, not a toy example.
+
+This `main` branch is the practical first step toward that goal: a
+**usable**, thoroughly tested (unit tests plus a live end-to-end CRUD suite —
+see "Running the tests" below) client, built first to have a working,
+protocol-correct reference implementation before attempting to formally
+prove anything about it. Everything documented below describes this branch;
+it remains useful in its own right — including as the reference the
+`verified` branch's proofs get checked against — independent of how far that
+work progresses.
+
 ## Install / build
 
 Requires [pack](https://github.com/stefan-hoeck/idris2-pack).
