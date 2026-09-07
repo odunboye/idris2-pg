@@ -1,6 +1,7 @@
 module Idris2_pg
 
 import Data.IORef
+import Data.List
 import Data.Maybe
 import Data.PGTypes
 import Data.PGValue
@@ -29,7 +30,9 @@ connectDB cfg = do
                                       (e :: _) => pure (Left (SqlError e))
                                       []       => do
                                         ref <- newIORef (map status (ready sr))
-                                        pure (Right (MkDB conx (Just sr) cfg ref))
+                                        cache <- newIORef []
+                                        counter <- newIORef 0
+                                        pure (Right (MkDB conx (Just sr) cfg ref cache counter))
 
 -- Records the transaction status from a batch's final ReadyForQuery (the
 -- last result's, since a multi-statement batch shares one at the end) so
@@ -56,26 +59,58 @@ queryDB db str = do
 
 -- Runs a query via the extended protocol (Parse/Bind/Describe/Execute/Sync)
 -- with text-encoded parameters, so caller-supplied values never need to be
--- escaped/interpolated into the SQL string. Uses an unnamed statement and
--- portal - no prepared-statement caching/reuse across calls. Postgres only
--- allows a single statement per Parse, so this always yields one result.
+-- escaped/interpolated into the SQL string. Postgres only allows a single
+-- statement per Parse, so this always yields one result.
+--
+-- The Parse step is skipped for a query text already prepared earlier on
+-- this connection (see DB.stmtCache) - a named statement persists for the
+-- life of the session, so this is safe to reuse across calls. A statement
+-- is cached only after a fully clean first run, and evicted on any error
+-- (whether that error is because the SQL was actually bad, in which case
+-- it was never cached to begin with, or because something upstream of the
+-- statement itself changed) so a bad cache entry never sticks around - at
+-- worst that just costs an extra re-Parse next time, same as no caching.
 execParams : DB -> String -> List (Maybe String) -> IO (Either PGError (List QueryResult))
 execParams db query params = do
-  let bindParams = map (map stringToBytes) params
-      frame = encode (Parse "" query [])
-                ++ encode (Bind "" "" bindParams)
-                ++ encode (Describe 'P' "")
-                ++ encode (Execute "" 0)
-                ++ encode Sync
-  resp <- send (MkConnected (socket (conn db))) frame
-  case resp of
-       (Left x) => pure (Left (ConnectionError x))
-       (Right x) => do
-         res <- handleQueryResponses db
-         case res of
-              Right results => noteStatus db results
-              Left _        => pure ()
-         pure res
+  cache <- readIORef (stmtCache db)
+  case lookup query cache of
+       Just stmtName => runPrepared stmtName False
+       Nothing => do
+         n <- readIORef (stmtCounter db)
+         writeIORef (stmtCounter db) (n + 1)
+         runPrepared ("idris2pg_stmt_" ++ show n) True
+  where
+    dropCached : IO ()
+    dropCached = modifyIORef (stmtCache db) (filter (\(k, _) => k /= query))
+
+    cacheStmt : String -> IO ()
+    cacheStmt stmtName = modifyIORef (stmtCache db) ((query, stmtName) ::)
+
+    runPrepared : String -> Bool -> IO (Either PGError (List QueryResult))
+    runPrepared stmtName isNew = do
+      let bindParams = map (map stringToBytes) params
+          parseFrame = if isNew then encode (Parse stmtName query []) else []
+          frame = parseFrame
+                    ++ encode (Bind "" stmtName bindParams)
+                    ++ encode (Describe 'P' "")
+                    ++ encode (Execute "" 0)
+                    ++ encode Sync
+      resp <- send (MkConnected (socket (conn db))) frame
+      case resp of
+           Left x => do
+             dropCached
+             pure (Left (ConnectionError x))
+           Right () => do
+             res <- handleQueryResponses db
+             case res of
+                  Right results => do
+                    noteStatus db results
+                    let hasError = any (\qr => case errors qr of [] => False; _ => True) results
+                    if hasError
+                       then dropCached
+                       else when isNew (cacheStmt stmtName)
+                  Left _ => dropCached
+             pure res
 
 
 -- Runs a query, choosing the simple protocol for zero-arg statements (e.g.
@@ -173,7 +208,7 @@ cancelQuery db = case map backendKey (result db) of
 
 public export
 closeDB : DB -> IO ()
-closeDB (MkDB (MkPGConnection socket _) _ _ _) = do
+closeDB (MkDB (MkPGConnection socket _) _ _ _ _ _) = do
   _ <- send (MkConnected socket) (encode Terminate)
   _ <- close (MkConnected socket)
   pure ()

@@ -1,5 +1,6 @@
 module Main
 
+import Data.IORef
 import Data.Maybe
 import Data.String
 import System
@@ -206,6 +207,29 @@ main = do
        (Just (Just "present"), Just Nothing) => putStrLn "OK NULL round-trips correctly alongside a real value"
        vals => putStrLn ("FAIL null_demo values: " ++ show vals)
   _ <- execCommand db "DROP TABLE null_demo" []
+
+  -- Prepared statement caching: running the same query text twice should
+  -- populate, then reuse, one cache entry keyed by that text (white-box
+  -- check on DB.stmtCache, not just that results stay correct - that alone
+  -- wouldn't prove caching actually happened rather than always
+  -- re-Parse-ing). Other queries earlier in this test are cached too, so
+  -- this looks up its own key rather than assuming an empty/singleton cache.
+  let cacheQuery = "SELECT $1::int AS n"
+  Right rows1 <- queryRows db cacheQuery [Just "5"]
+    | Left err => putStrLn ("FAIL cache query 1: " ++ displayError err)
+  cacheAfterFirst <- lookup cacheQuery <$> readIORef (stmtCache db)
+  Right rows2 <- queryRows db cacheQuery [Just "7"]
+    | Left err => putStrLn ("FAIL cache query 2: " ++ displayError err)
+  cacheAfterSecond <- lookup cacheQuery <$> readIORef (stmtCache db)
+  case (map (\r => getInt r "n") rows1, map (\r => getInt r "n") rows2) of
+       ([Right 5], [Right 7]) =>
+         case (cacheAfterFirst, cacheAfterSecond) of
+              (Just name1, Just name2) =>
+                if name1 == name2
+                   then putStrLn "OK prepared statement cached and reused correctly"
+                   else putStrLn ("FAIL: cache entry changed between calls: " ++ show (name1, name2))
+              other => putStrLn ("FAIL: expected a cache entry both times: " ++ show other)
+       other => putStrLn ("FAIL prepared statement caching results: " ++ show other)
 
   closeDB db
   putStrLn "OK done"

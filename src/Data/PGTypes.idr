@@ -365,3 +365,10 @@ record DB where
   -- Updated after every query with the transaction status from its
   -- ReadyForQuery, so txStatus can report it without a round-trip.
   txState : IORef (Maybe TxStatus)
+  -- Prepared statements from execParams, keyed by exact SQL text, so a
+  -- repeated query skips re-Parse on the server. A plain association list
+  -- is fine here - realistically dozens of distinct statements per
+  -- connection, not thousands. No cache size cap or explicit statement
+  -- cleanup (Terminate frees them all on close).
+  stmtCache   : IORef (List (String, String))
+  stmtCounter : IORef Int
