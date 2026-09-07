@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Compile the library and run the codec/value-parser unit tests. These
+  # don't touch a real database.
+  build-and-unit-test:
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build idris2-pg
+        run: pack build idris2-pg.ipkg
+
+      - name: Build and run unit tests
+        working-directory: test
+        run: |
+          pack build unit-test.ipkg
+          ./build/exec/idris2-pg-unit-test | tee unit-test-output.txt
+          ! grep -q '^FAIL' unit-test-output.txt
+
+  # End-to-end CRUD smoke test against a real Postgres.
+  live-crud-test:
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+          # pg_hba.conf method - see the password_encryption step below for
+          # why this alone isn't enough to get real MD5 auth on PG14+.
+          POSTGRES_HOST_AUTH_METHOD: md5
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Force md5 password storage
+        # Postgres 14+ defaults password_encryption to scram-sha-256, so a
+        # freshly created role's password is SCRAM-hashed even when
+        # pg_hba.conf says "md5" - which makes the server negotiate SASL,
+        # not MD5. Re-hashing the password after switching
+        # password_encryption forces genuine MD5 auth, matching what this
+        # client supports (see README).
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends postgresql-client
+          PGPASSWORD=testpass psql -h postgres -U testuser -d testdb -c "ALTER SYSTEM SET password_encryption = 'md5';"
+          PGPASSWORD=testpass psql -h postgres -U testuser -d testdb -c "SELECT pg_reload_conf();"
+          PGPASSWORD=testpass psql -h postgres -U testuser -d testdb -c "ALTER USER testuser WITH PASSWORD 'testpass';"
+
+      - name: Build idris2-pg
+        run: pack build idris2-pg.ipkg
+
+      - name: Build and run the CRUD smoke test
+        working-directory: test
+        env:
+          PG_TEST_HOST: postgres
+          PG_TEST_PORT: "5432"
+          PG_TEST_USER: testuser
+          PG_TEST_PASSWORD: testpass
+          PG_TEST_DB: testdb
+        run: |
+          pack build test.ipkg
+          ./build/exec/idris2-pg-test | tee crud-test-output.txt
+          ! grep -q '^FAIL' crud-test-output.txt
