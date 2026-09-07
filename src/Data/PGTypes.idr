@@ -1,0 +1,307 @@
+module Data.PGTypes
+
+import Derive.Prelude
+import Data.Bits
+import Network.Socket
+import Network.Core
+
+%language ElabReflection
+%default total
+
+public export
+data Role = Client | Server
+
+public export
+data PGFormat = Text | Binary
+
+public export
+data PGState
+  = Disconnected
+  | Connected
+  | StartupSent
+  | Authenticating
+  | Ready
+  | Querying
+  | Closed
+
+public export
+record PGConnection (state : PGState) where
+  constructor MkPGConnection
+  socket : Socket
+  params : List (String, String)  -- e.g. user, database
+--%runElab derive "PGConnection" [Show, Eq]
+
+public export
+mkConnectedPG : (PGConnection StartupSent) -> (PGConnection Connected)
+mkConnectedPG (MkPGConnection socket params) = MkPGConnection socket params
+
+public export
+mkConnectedFromReady : (PGConnection Ready) -> (PGConnection Connected)
+mkConnectedFromReady  (MkPGConnection socket params) = MkPGConnection socket params
+
+public export
+Bytes : Type
+Bytes = List Bits8
+ 
+public export
+data Tag
+  = AuthenticationTag         -- 'R'
+  | BackendKeyDataTag         -- 'K'
+  | BindCompleteTag           -- '2'
+  | CloseCompleteTag          -- '3'
+  | CommandCompleteTag        -- 'C'
+  | DataRowTag                -- 'D'
+  | EmptyQueryResponseTag     -- 'I'
+  | ErrorResponseTag          -- 'E'
+  | NoticeResponseTag         -- 'N'
+  | NotificationResponseTag   -- 'A'
+  | ParameterDescriptionTag   -- 't'
+  | ParameterStatusTag        -- 'S'
+  | ParseCompleteTag          -- '1'
+  | PortalSuspendedTag        -- 's'
+  | ReadyForQueryTag          -- 'Z'
+  | RowDescriptionTag         -- 'T'
+  | QueryTag                  -- 'Q'
+  | UnknownTag String
+
+%runElab derive "Tag" [Show, Eq]
+
+public export
+tagFromString : String -> Tag
+tagFromString s =
+  case s of
+    "R" => AuthenticationTag
+    "K" => BackendKeyDataTag
+    "2" => BindCompleteTag
+    "3" => CloseCompleteTag
+    "C" => CommandCompleteTag
+    "D" => DataRowTag
+    "I" => EmptyQueryResponseTag
+    "E" => ErrorResponseTag
+    "N" => NoticeResponseTag
+    "A" => NotificationResponseTag
+    "t" => ParameterDescriptionTag
+    "S" => ParameterStatusTag
+    "1" => ParseCompleteTag
+    "s" => PortalSuspendedTag
+    "Z" => ReadyForQueryTag
+    "T" => RowDescriptionTag
+    "Q" => QueryTag
+    _   => UnknownTag s
+
+public export
+data PGAuthResponseTag
+  = AuthOk
+  | AuthCleartext
+  | AuthMD5 String
+  | AuthSASL
+  | AuthUnknown Int
+%runElab derive "PGAuthResponseTag" [Show]
+
+public export
+parseAuthResponse : Int -> String -> PGAuthResponseTag
+parseAuthResponse i salt =
+  case i of
+    0  => AuthOk
+    3  => AuthCleartext
+    5  => AuthMD5 salt
+    10 => AuthSASL
+    n  => AuthUnknown n
+
+public export
+toByte : Tag -> Bits8
+toByte ReadyForQueryTag          = 0x5A  -- 'Z'
+toByte AuthenticationTag         = 0x52  -- 'R'
+toByte ErrorResponseTag          = 0x45  -- 'E'
+toByte ParameterStatusTag        = 0x53  -- 'S'
+toByte BackendKeyDataTag         = 0x4B  -- 'K'
+toByte DataRowTag                = 0x44  -- 'D'
+toByte RowDescriptionTag         = 0x54  -- 'T'
+toByte CommandCompleteTag        = 0x43  -- 'C'
+toByte BindCompleteTag           = 0x32  -- '2'
+toByte CloseCompleteTag          = 0x33  -- '3'
+toByte EmptyQueryResponseTag     = 0x49  -- 'I'
+toByte NoticeResponseTag         = 0x4E  -- 'N'
+toByte NotificationResponseTag   = 0x41  -- 'A'
+toByte ParameterDescriptionTag   = 0x74  -- 't'
+toByte ParseCompleteTag          = 0x31  -- '1'
+toByte PortalSuspendedTag        = 0x73  -- 's'
+toByte QueryTag                  = 0x51  -- 'Q'
+toByte (UnknownTag b)         = cast b
+
+data TxStatus
+  = Idle
+  | InTransaction
+  | FailedTransaction
+  | UnknownStatus Bits8
+%runElab derive "TxStatus" [Show, Eq]
+
+public export
+fromByte : Bits8 -> TxStatus
+fromByte 0x49 = Idle
+fromByte 0x54 = InTransaction
+fromByte 0x45 = FailedTransaction
+fromByte b    = UnknownStatus b
+
+public export
+record ReadyForQuery where
+  constructor MkReadyForQuery
+  status : TxStatus
+%runElab derive "ReadyForQuery" [Show, Eq]
+
+public export
+record FieldDescription where
+  constructor MkFieldDescription
+  name : String
+  tableOID : Int
+  columnAttr : Int
+  typeOID : Int
+  typeSize : Int
+  typeMod : Int
+  formatCode : Int
+%runElab derive "FieldDescription" [Show, Eq]
+
+public export
+record RowDescription where
+  constructor MkRowDescription
+  fields : List FieldDescription
+%runElab derive "RowDescription" [Show, Eq]
+
+public export
+record DataRow where
+  constructor MkDataRow
+  columnCount : Int
+  columns     : List (Maybe String)
+%runElab derive "DataRow" [Show, Eq]
+
+
+public export
+record ParameterStatus where
+  constructor MkParameterStatus
+  key : String 
+  val : String
+%runElab derive "ParameterStatus" [Show, Eq]
+
+
+public export
+record BackendKeyData where
+  constructor MkBackendKeyData
+  pid : Int 
+  secret : Int
+%runElab derive "BackendKeyData" [Show, Eq]
+
+
+public export
+record Error where
+  constructor MkError
+  error : String 
+%runElab derive "Error" [Show, Eq]
+
+public export
+record Query  where
+  constructor MkQuery
+  body : String 
+
+CommandComplete : Type
+CommandComplete = String 
+
+record NoticeField where
+  constructor MkField
+  tag : Char
+  value : String
+%runElab derive "NoticeField" [Show, Eq]
+
+record Notice where
+  constructor MkNotice
+  fields : List NoticeField
+%runElab derive "Notice" [Show, Eq]
+
+public export
+data PGMsg
+  = StartupMsg Int (List (String, String))
+  | QueryMsg Query
+  | ReadyForQueryMsg  TxStatus
+  | AuthenticationMsg PGAuthResponseTag
+  | ErrorMsg Error
+  | ParameterStatusMsg ParameterStatus
+  | BackendKeyDataMsg BackendKeyData
+  | DataRowMsg DataRow
+  | RowDescriptionMsg  RowDescription
+  | CommandCompleteMsg String
+  | NoticeMsg Notice
+  | UnknownMsg Tag Bytes
+-- %runElab derive "PGMsg" [Show]
+
+
+public export
+record FrameBytes where
+  constructor MkFrameBytes
+  tag : Bytes
+  len : Bytes
+  payload : Bytes
+%runElab derive "FrameBytes" [Show, Eq]
+
+
+public export
+frameBytesToList : FrameBytes -> Bytes
+frameBytesToList (MkFrameBytes tag len payload) = tag ++ len ++ payload
+
+
+public export
+record Frame where
+  constructor MkFrame
+  tag : Tag
+  len : Int
+  payload : Bytes
+%runElab derive "Frame" [Show, Eq]
+
+
+public export
+record StartupResult where
+  constructor MkStartupResult
+  authState   : Maybe PGAuthResponseTag
+  params      : List ParameterStatus
+  backendKey  : Maybe BackendKeyData
+  ready       : Maybe ReadyForQuery
+  errors      : List Error
+  notices     : List Notice
+-- %runElab derive "StartupResult" [Show]
+
+
+public export
+showStartUpResult: Maybe StartupResult -> IO()
+showStartUpResult Nothing = putStrLn "No DB"
+showStartUpResult (Just (MkStartupResult authState params backendKey ready errors notices)) = do
+  putStrLn ("Authstate: " ++ show authState)
+  putStrLn ("Params: " ++ show params)
+  putStrLn ("BackendKeyData: " ++ show backendKey)
+  putStrLn ("Ready: " ++ show ready)
+  putStrLn ("Errors: " ++ show errors)
+  putStrLn ("Notices: " ++ show notices)
+
+
+public export
+record QueryResult where
+  constructor MkQueryResult
+  description : Maybe RowDescription
+  rows        : List DataRow
+  commandTag  : Maybe String
+  status      : Maybe ReadyForQuery
+  errors      : List Error
+  notices     : List Notice
+-- %runElab derive "QueryResult" [Show]
+
+
+public export
+showQueryResult : QueryResult -> IO ()
+showQueryResult (MkQueryResult description rows commandTag status errors notices) = do
+  putStrLn ("RowDescription: " ++ show description)
+  putStrLn ("Row: " ++ show rows)
+
+
+public export
+record DB where
+  constructor MkDB
+  conn   : PGConnection Connected
+  result : Maybe StartupResult
+--%runElab derive "DB" [Show]
