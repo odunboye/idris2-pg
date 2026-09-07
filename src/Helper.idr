@@ -82,6 +82,11 @@ decodeCString bs =
     (chars, 0 :: rest) => Right (pack (map cast chars), rest)
     _ => Left "decodeCString: unterminated string"
 
+-- Raw (non-null-terminated) UTF8 bytes, for extended-protocol parameter values.
+public export
+stringToBytes : String -> Bytes
+stringToBytes s = map cast (unpack s)
+
 eitherToMaybe : Either e a -> Maybe a
 eitherToMaybe (Left _) = Nothing
 eitherToMaybe (Right v) = Just v
@@ -213,6 +218,37 @@ encode (PasswordMessage pw) =
   in [0x70] ++ encodeInt32 (cast len) ++ payload  -- 'p'
 
 encode Terminate = [0x58] ++ encodeInt32 4  -- 'X', no payload
+
+encode (Parse stmtName query paramTypes) =
+  let payload = encodeCString stmtName ++ encodeCString query
+                  ++ encodeInt16 (cast (length paramTypes))
+                  ++ concatMap encodeInt32 paramTypes
+      len = 4 + length payload
+  in [0x50] ++ encodeInt32 (cast len) ++ payload  -- 'P'
+
+encode (Bind portal stmtName params) =
+  let encodeParam : Maybe Bytes -> Bytes
+      encodeParam Nothing = encodeInt32 (-1)
+      encodeParam (Just bytes) = encodeInt32 (cast (length bytes)) ++ bytes
+      payload = encodeCString portal ++ encodeCString stmtName
+                  ++ encodeInt16 0  -- all parameters are text format
+                  ++ encodeInt16 (cast (length params))
+                  ++ concatMap encodeParam params
+                  ++ encodeInt16 0  -- all results in text format
+      len = 4 + length payload
+  in [0x42] ++ encodeInt32 (cast len) ++ payload  -- 'B'
+
+encode (Describe kind name) =
+  let payload = [cast (ord kind)] ++ encodeCString name
+      len = 4 + length payload
+  in [0x44] ++ encodeInt32 (cast len) ++ payload  -- 'D'
+
+encode (Execute portal maxRows) =
+  let payload = encodeCString portal ++ encodeInt32 maxRows
+      len = 4 + length payload
+  in [0x45] ++ encodeInt32 (cast len) ++ payload  -- 'E'
+
+encode Sync = [0x53] ++ encodeInt32 4  -- 'S', no payload
 
 encode _ =  ?unimplementedEncode
 

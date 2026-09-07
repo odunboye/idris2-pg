@@ -226,6 +226,14 @@ data PGMsg
   | QueryMsg Query
   | PasswordMessage String
   | Terminate
+  -- Extended query protocol (parameterized queries): unnamed statement/portal
+  -- names ("") are used throughout since this client doesn't cache/reuse
+  -- prepared statements across calls.
+  | Parse String String (List Int)             -- stmt name, query, param type OIDs (0 = infer)
+  | Bind String String (List (Maybe Bytes))     -- portal, stmt, text-encoded params (Nothing = NULL)
+  | Describe Char String                        -- 'S' (statement) or 'P' (portal), name
+  | Execute String Int                          -- portal, max rows (0 = unlimited)
+  | Sync
   | ReadyForQueryMsg  TxStatus
   | AuthenticationMsg PGAuthResponseTag
   | ErrorMsg Error

@@ -29,11 +29,30 @@ queryDB : DB -> String -> IO (Either String QueryResult)
 queryDB db str = do
   let queryFrame = encode (QueryMsg (MkQuery str))
   resp <- send (MkConnected (socket (conn db))) queryFrame
-  case resp of 
+  case resp of
        (Left x) => pure (Left x)
-       (Right x) => do 
-         res <- handleQueryResponse db 
+       (Right x) => do
+         res <- handleQueryResponse db
          pure (Right res )
+
+-- Runs a query via the extended protocol (Parse/Bind/Describe/Execute/Sync)
+-- with text-encoded parameters, so caller-supplied values never need to be
+-- escaped/interpolated into the SQL string. Uses an unnamed statement and
+-- portal - no prepared-statement caching/reuse across calls.
+execParams : DB -> String -> List (Maybe String) -> IO (Either String QueryResult)
+execParams db query params = do
+  let bindParams = map (map stringToBytes) params
+      frame = encode (Parse "" query [])
+                ++ encode (Bind "" "" bindParams)
+                ++ encode (Describe 'P' "")
+                ++ encode (Execute "" 0)
+                ++ encode Sync
+  resp <- send (MkConnected (socket (conn db))) frame
+  case resp of
+       (Left x) => pure (Left x)
+       (Right x) => do
+         res <- handleQueryResponse db
+         pure (Right res)
 
 
 --closeDB
