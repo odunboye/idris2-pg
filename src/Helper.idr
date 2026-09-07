@@ -129,7 +129,7 @@ fieldValue c (f :: fs) = if tag f == c then Just (value f) else fieldValue c fs
 public export
 mkError : List NoticeField -> Error
 mkError fields = MkError (fieldValue 'S' fields) (fieldValue 'C' fields)
-                          (fromMaybe "" (fieldValue 'M' fields))
+                          (fromMaybe "" (fieldValue 'M' fields)) fields
 
 public export
 decodeInt32List : Nat -> Bytes -> Either String (List Int)
@@ -365,42 +365,48 @@ startupstep acc _                     = acc
 
 
 public export
-handleStartupResponse : (user : String) -> (password : String) -> PGConnection Connected -> IO StartupResult
+handleStartupResponse : (user : String) -> (password : String) -> PGConnection Connected -> IO (Either PGError StartupResult)
 handleStartupResponse user password conn = go init
   where
     init : StartupResult
     init = MkStartupResult Nothing [] Nothing Nothing [] []
 
-    fail : StartupResult -> String -> StartupResult
-    fail acc msg = { errors := acc.errors ++ [MkError Nothing Nothing msg] } acc
+    -- Nothing on the wire went wrong, but this session can't proceed
+    -- (unsupported auth method) - a protocol-level failure, not a query error.
+    unsupported : String -> IO (Either PGError StartupResult)
+    unsupported msg = pure (Left (ProtocolError msg))
 
-    sendPassword : StartupResult -> String -> IO StartupResult
-    sendPassword acc pw = do
+    sendPassword : String -> IO (Either PGError ())
+    sendPassword pw = do
       res <- send (MkConnected (socket conn)) (encode (PasswordMessage pw))
       case res of
-           Left err => pure (fail acc err)
-           Right () => pure acc
+           Left err => pure (Left (ConnectionError err))
+           Right () => pure (Right ())
 
-    go : StartupResult -> IO StartupResult
+    go : StartupResult -> IO (Either PGError StartupResult)
     go acc = do
       bs <- readFrame conn
       case bs of
-        Left err => pure (fail acc err)
+        Left err => pure (Left (ConnectionError err))
         Right msg =>
               case msg of
-                ReadyForQueryMsg r => pure ({ ready := Just (MkReadyForQuery r) } acc)
+                ReadyForQueryMsg r => pure (Right ({ ready := Just (MkReadyForQuery r) } acc))
                 AuthenticationMsg AuthOk => go ({ authState := Just AuthOk } acc)
                 AuthenticationMsg AuthCleartext => do
-                  acc' <- sendPassword acc password
-                  go ({ authState := Just AuthCleartext } acc')
+                  sent <- sendPassword password
+                  case sent of
+                       Left err => pure (Left err)
+                       Right () => go ({ authState := Just AuthCleartext } acc)
                 AuthenticationMsg (AuthMD5 salt) => do
                   let hashed = pgMD5Password password user salt
-                  acc' <- sendPassword acc hashed
-                  go ({ authState := Just (AuthMD5 salt) } acc')
+                  sent <- sendPassword hashed
+                  case sent of
+                       Left err => pure (Left err)
+                       Right () => go ({ authState := Just (AuthMD5 salt) } acc)
                 AuthenticationMsg AuthSASL =>
-                  pure (fail acc "SCRAM-SHA-256 (SASL) authentication is not supported")
+                  unsupported "SCRAM-SHA-256 (SASL) authentication is not supported"
                 AuthenticationMsg (AuthUnknown n) =>
-                  pure (fail acc ("Unsupported authentication method: " ++ show n))
+                  unsupported ("Unsupported authentication method: " ++ show n)
                 _                  => go (startupstep acc msg)
 
 
@@ -415,15 +421,15 @@ querystep acc _                      = acc
 
 
 public export
-handleQueryResponse : DB -> IO QueryResult
+handleQueryResponse : DB -> IO (Either PGError QueryResult)
 handleQueryResponse db = go (MkQueryResult Nothing [] Nothing Nothing [] [])
   where
-    go : QueryResult -> IO QueryResult
+    go : QueryResult -> IO (Either PGError QueryResult)
     go acc = do
       bs <- readFrame (conn db)
       case bs of
-        Left err => pure ({ errors := acc.errors ++ [MkError Nothing Nothing err] } acc)
+        Left err => pure (Left (ConnectionError err))
         Right msg =>
               case msg of
-                ReadyForQueryMsg r => pure ({ status := Just (MkReadyForQuery r) } acc)
+                ReadyForQueryMsg r => pure (Right ({ status := Just (MkReadyForQuery r) } acc))
                 _                  => go (querystep acc msg)

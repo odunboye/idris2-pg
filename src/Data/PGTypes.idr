@@ -192,22 +192,6 @@ record BackendKeyData where
 
 
 public export
-record Error where
-  constructor MkError
-  severity : Maybe String
-  code     : Maybe String
-  message  : String
-%runElab derive "Error" [Show, Eq]
-
-public export
-record Query  where
-  constructor MkQuery
-  body : String
-
-CommandComplete : Type
-CommandComplete = String
-
-public export
 record NoticeField where
   constructor MkField
   tag : Char
@@ -219,6 +203,59 @@ record Notice where
   constructor MkNotice
   fields : List NoticeField
 %runElab derive "Notice" [Show, Eq]
+
+public export
+record Error where
+  constructor MkError
+  severity : Maybe String
+  code     : Maybe String
+  message  : String
+  raw      : List NoticeField
+%runElab derive "Error" [Show, Eq]
+
+-- Field codes per the Postgres protocol's ErrorResponse/NoticeResponse
+-- message format (the ones not already broken out above as severity/code).
+lookupField : Char -> Error -> Maybe String
+lookupField c e = go (raw e)
+  where
+    go : List NoticeField -> Maybe String
+    go [] = Nothing
+    go (f :: fs) = if tag f == c then Just (value f) else go fs
+
+public export
+detail, hint, position, schemaName, tableName, columnName, dataTypeName, constraintName
+  : Error -> Maybe String
+detail         = lookupField 'D'
+hint           = lookupField 'H'
+position       = lookupField 'P'
+schemaName     = lookupField 's'
+tableName      = lookupField 't'
+columnName     = lookupField 'c'
+dataTypeName   = lookupField 'd'
+constraintName = lookupField 'n'
+
+||| Distinguishes transport-level failures, protocol-level surprises, and
+||| genuine SQL errors reported by the server, so callers can decide whether
+||| e.g. a retry makes sense without string-matching an error message.
+public export
+data PGError
+  = ConnectionError String
+  | ProtocolError String
+  | SqlError Error
+
+public export
+displayError : PGError -> String
+displayError (ConnectionError s) = "connection error: " ++ s
+displayError (ProtocolError s)   = "protocol error: " ++ s
+displayError (SqlError e)        = "SQL error: " ++ message e
+
+public export
+record Query  where
+  constructor MkQuery
+  body : String
+
+CommandComplete : Type
+CommandComplete = String
 
 public export
 data PGMsg

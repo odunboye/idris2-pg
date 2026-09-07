@@ -21,39 +21,39 @@ record PGConfig where
   database : String
 
 public export
-connectDB : PGConfig -> IO (Either String DB)
+connectDB : PGConfig -> IO (Either PGError DB)
 connectDB cfg = do
   conn <- connectPG (host cfg) (port cfg)
   case conn of
-       Nothing => pure (Left "Could not connect")
+       Nothing => pure (Left (ConnectionError "Could not connect"))
        (Just pgConn) => do
          let startupMsg = encode (StartupMsg 3 [("user", user cfg), ("database", database cfg)])
          spgConn <- sendStartup pgConn startupMsg
          case spgConn of
-              Nothing => pure (Left "Error sending StartupMsg")
+              Nothing => pure (Left (ConnectionError "Error sending StartupMsg"))
               (Just x) => do
                 let conx = mkConnectedPG x
                 res <- handleStartupResponse (user cfg) (password cfg) conx
-                case errors res of
-                     (e :: _) => pure (Left (message e))
-                     []       => pure (Right (MkDB conx (Just res)))
+                case res of
+                     Left err => pure (Left err)
+                     Right sr => case errors sr of
+                                      (e :: _) => pure (Left (SqlError e))
+                                      []       => pure (Right (MkDB conx (Just sr)))
 
 
-queryDB : DB -> String -> IO (Either String QueryResult)
+queryDB : DB -> String -> IO (Either PGError QueryResult)
 queryDB db str = do
   let queryFrame = encode (QueryMsg (MkQuery str))
   resp <- send (MkConnected (socket (conn db))) queryFrame
   case resp of
-       (Left x) => pure (Left x)
-       (Right x) => do
-         res <- handleQueryResponse db
-         pure (Right res )
+       (Left x) => pure (Left (ConnectionError x))
+       (Right x) => handleQueryResponse db
 
 -- Runs a query via the extended protocol (Parse/Bind/Describe/Execute/Sync)
 -- with text-encoded parameters, so caller-supplied values never need to be
 -- escaped/interpolated into the SQL string. Uses an unnamed statement and
 -- portal - no prepared-statement caching/reuse across calls.
-execParams : DB -> String -> List (Maybe String) -> IO (Either String QueryResult)
+execParams : DB -> String -> List (Maybe String) -> IO (Either PGError QueryResult)
 execParams db query params = do
   let bindParams = map (map stringToBytes) params
       frame = encode (Parse "" query [])
@@ -63,35 +63,33 @@ execParams db query params = do
                 ++ encode Sync
   resp <- send (MkConnected (socket (conn db))) frame
   case resp of
-       (Left x) => pure (Left x)
-       (Right x) => do
-         res <- handleQueryResponse db
-         pure (Right res)
+       (Left x) => pure (Left (ConnectionError x))
+       (Right x) => handleQueryResponse db
 
 
 -- Runs a query, choosing the simple protocol for zero-arg statements (e.g.
 -- DDL) and the extended protocol otherwise, then reports the first server
 -- error (if any) as a Left instead of a "successful" empty result.
-runQuery : DB -> String -> List (Maybe String) -> IO (Either String QueryResult)
+runQuery : DB -> String -> List (Maybe String) -> IO (Either PGError QueryResult)
 runQuery db stmt [] = queryDB db stmt
 runQuery db stmt params = execParams db stmt params
 
-collectErrors : QueryResult -> Either String QueryResult
+collectErrors : QueryResult -> Either PGError QueryResult
 collectErrors qr = case errors qr of
-     (e :: _) => Left (message e)
+     (e :: _) => Left (SqlError e)
      []       => Right qr
 
 ||| Run an INSERT/UPDATE/DELETE/DDL statement. Returns the command tag
 ||| (e.g. "INSERT 0 1") on success.
 public export
-execCommand : DB -> String -> List (Maybe String) -> IO (Either String String)
+execCommand : DB -> String -> List (Maybe String) -> IO (Either PGError String)
 execCommand db stmt params = do
   result <- runQuery db stmt params
   pure (result >>= collectErrors >>= \qr => Right (fromMaybe "" (commandTag qr)))
 
 ||| Run a SELECT and return the decoded rows.
 public export
-queryRows : DB -> String -> List (Maybe String) -> IO (Either String (List Row))
+queryRows : DB -> String -> List (Maybe String) -> IO (Either PGError (List Row))
 queryRows db stmt params = do
   result <- runQuery db stmt params
   pure (result >>= collectErrors >>= \qr => Right (toRows qr))
@@ -108,11 +106,11 @@ testDrive = do
   let cfg = MkPGConfig "127.0.0.1" 5432 "root" "" "theideabankdb"
   db <- connectDB cfg
   case db of
-       (Left err) => putStrLn err
+       (Left err) => putStrLn (displayError err)
        (Right dbConn) => do
          _ <- showStartUpResult (result dbConn)
          some <- queryRows dbConn "select * from role" []
          case some of
-              (Left err) => putStrLn err
+              (Left err) => putStrLn (displayError err)
               (Right rows) => printLn rows
          closeDB dbConn
