@@ -10,6 +10,7 @@ import Crypto.Curve25519
 import Crypto.ChaCha20
 import Crypto.Poly1305
 import Crypto.ChaCha20Poly1305
+import Crypto.HKDF
 import Data.PGValue
 import Network.Timeout
 import System
@@ -338,6 +339,29 @@ main = do
          check "chacha20poly1305 rejects a tampered ciphertext" Nothing
            (decrypt aeadKey1 aeadNonce1 aeadAad1 ((b0 `xor` 1) :: rest) aeadTag1)
        [] => putStrLn "FAIL chacha20poly1305 tamper check: ciphertext was unexpectedly empty"
+
+  -- Crypto.HKDF, against Python cryptography-generated reference vectors
+  -- (generic HKDF-Extract/Expand, plus HKDF-Expand-Label checked against
+  -- an independent Python reimplementation of RFC 8446's HkdfLabel struct).
+  let hkdfSalt1 = hexToBytes "7670cb4cef0c526cdab53a08b1"
+  let hkdfIkm1 = hexToBytes "e9ae6fed814022410fd3a8f59461228535e3117b57a6"
+  let hkdfInfo1 = hexToBytes "cb9ac402be3f0e9a00cc"
+  let hkdfPrk1 = hkdfExtract hkdfSalt1 hkdfIkm1
+  check "hkdfExtract" "e03c04d0f1d9b10fd73947599a672615c575ee9a56428071ce475ebbd2f70e42" (toHex hkdfPrk1)
+  check "hkdfExpand" "19b58ee029db6699a82b4094a22378b93e45e4676f5790749894427ba4a4ed9576e6c955a751a8e0610f"
+    (toHex (hkdfExpand hkdfPrk1 hkdfInfo1 42))
+
+  let hkdfSalt2 = hexToBytes "4930cffed77e49f786d9ce4d6b025e67"
+  let hkdfIkm2 = hexToBytes "234980cf8b465c16a1423b4ab674a788369f368396330925b47cf30b36df4759"
+  let hkdfPrk2 = hkdfExtract hkdfSalt2 hkdfIkm2
+  check "hkdfExpand across multiple HMAC blocks (100 bytes, empty info)"
+    "e03279c7e6536ab41ceee881ca9cfcdfbb04a927a234054064e9a2cf85b566ea23fe7aa350869e6db3f6b976c53f65ad047648563651ef914d80595740fd1c5a4e162d94c4c052f99b1fd4c9d0e66a659a1202a64b252c3dc60eb436c9c4dbbeb309a0a4"
+    (toHex (hkdfExpand hkdfPrk2 [] 100))
+
+  let hkdfSecret3 = hexToBytes "bef2ab5766dbb510bf50c2d39a5475d1ed9e28de27f78b261ccabaf7031551fe"
+  let hkdfContext3 = hexToBytes "d1f71bbd8250b0947cfcd0d730980939911ac0706117dc54895c4077c0a4ee7f"
+  check "hkdfExpandLabel (RFC 8446 HkdfLabel struct)" "94843d3f863bd550652c2a3cdfc82925c503be2e618cd71832f48a63cc83de86"
+    (toHex (hkdfExpandLabel hkdfSecret3 "c hs traffic" hkdfContext3 32))
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True
