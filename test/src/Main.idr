@@ -77,5 +77,22 @@ main = do
   Right _ <- execCommand db "DROP TABLE crud_demo" []
     | Left err => putStrLn ("FAIL final drop: " ++ displayError err)
 
+  -- Regression test for the multi-statement result-merging fix: a
+  -- ';'-separated batch must be rejected by the single-statement API...
+  multiViaSingle <- execCommand db "SELECT 1; SELECT 2" []
+  case multiViaSingle of
+       Left (ProtocolError _) => putStrLn "OK execCommand rejects multi-statement SQL"
+       Left err => putStrLn ("FAIL: wrong error for multi-statement SQL: " ++ displayError err)
+       Right _  => putStrLn "FAIL: execCommand silently accepted multi-statement SQL"
+
+  -- ...but must work correctly, as separate results, via execMulti.
+  Right multiResults <- execMulti db "SELECT 1 AS n; SELECT 2 AS n"
+    | Left err => putStrLn ("FAIL execMulti: " ++ displayError err)
+  case map toRows multiResults of
+       [[r1], [r2]] => case (getInt r1 "n", getInt r2 "n") of
+                             (Right 1, Right 2) => putStrLn "OK execMulti returns separate per-statement results"
+                             _ => putStrLn ("FAIL: execMulti returned wrong values: " ++ show multiResults)
+       _ => putStrLn ("FAIL: execMulti returned wrong shape: " ++ show multiResults)
+
   closeDB db
   putStrLn "OK done"

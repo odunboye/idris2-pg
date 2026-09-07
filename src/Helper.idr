@@ -412,24 +412,42 @@ handleStartupResponse user password conn = go init
 
 querystep : QueryResult -> PGMsg -> QueryResult
 querystep acc (RowDescriptionMsg rd) = { description := Just rd } acc
-querystep acc (DataRowMsg row)       = { rows := acc.rows ++ [row] } acc 
-querystep acc (CommandCompleteMsg c) = { commandTag := Just c } acc 
-querystep acc (ReadyForQueryMsg r)   = { status := Just (MkReadyForQuery r) } acc 
-querystep acc (ErrorMsg e)           = { errors := acc.errors ++ [e] } acc 
-querystep acc (NoticeMsg n)          = { notices := acc.notices ++ [n] } acc 
+querystep acc (DataRowMsg row)       = { rows := acc.rows ++ [row] } acc
+querystep acc (ErrorMsg e)           = { errors := acc.errors ++ [e] } acc
+querystep acc (NoticeMsg n)          = { notices := acc.notices ++ [n] } acc
 querystep acc _                      = acc
 
+emptyQueryResult : QueryResult
+emptyQueryResult = MkQueryResult Nothing [] Nothing Nothing [] []
 
+setStatusOnLast : ReadyForQuery -> List QueryResult -> List QueryResult
+setStatusOnLast r []        = [{ status := Just r } emptyQueryResult]
+setStatusOnLast r [x]       = [{ status := Just r } x]
+setStatusOnLast r (x :: xs) = x :: setStatusOnLast r xs
+
+-- Postgres's simple query protocol allows multiple ';'-separated statements
+-- in one Query message, each yielding its own RowDescription/DataRow*/
+-- CommandComplete (or EmptyQueryResponse for a blank statement) before a
+-- single final ReadyForQuery. `pending` accumulates the statement currently
+-- in progress; it flushes into `completed` at each CommandComplete/
+-- EmptyQueryResponse boundary, so each statement gets its own QueryResult
+-- instead of one merged/corrupted result.
 public export
-handleQueryResponse : DB -> IO (Either PGError QueryResult)
-handleQueryResponse db = go (MkQueryResult Nothing [] Nothing Nothing [] [])
+handleQueryResponses : DB -> IO (Either PGError (List QueryResult))
+handleQueryResponses db = go Nothing []
   where
-    go : QueryResult -> IO (Either PGError QueryResult)
-    go acc = do
+    go : Maybe QueryResult -> List QueryResult -> IO (Either PGError (List QueryResult))
+    go pending completed = do
       bs <- readFrame (conn db)
       case bs of
         Left err => pure (Left (ConnectionError err))
         Right msg =>
-              case msg of
-                ReadyForQueryMsg r => pure (Right ({ status := Just (MkReadyForQuery r) } acc))
-                _                  => go (querystep acc msg)
+          let acc = fromMaybe emptyQueryResult pending in
+          case msg of
+               ReadyForQueryMsg r =>
+                 case pending of
+                      Nothing => pure (Right (setStatusOnLast (MkReadyForQuery r) completed))
+                      Just _  => pure (Right (completed ++ [{ status := Just (MkReadyForQuery r) } acc]))
+               CommandCompleteMsg c => go Nothing (completed ++ [{ commandTag := Just c } acc])
+               EmptyQueryResponseMsg => go Nothing (completed ++ [acc])
+               _ => go (Just (querystep acc msg)) completed

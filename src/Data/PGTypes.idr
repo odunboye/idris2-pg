@@ -346,7 +346,7 @@ record QueryResult where
   status      : Maybe ReadyForQuery
   errors      : List Error
   notices     : List Notice
--- %runElab derive "QueryResult" [Show]
+%runElab derive "QueryResult" [Show]
 
 
 public export

@@ -41,19 +41,20 @@ connectDB cfg = do
                                       []       => pure (Right (MkDB conx (Just sr)))
 
 
-queryDB : DB -> String -> IO (Either PGError QueryResult)
+queryDB : DB -> String -> IO (Either PGError (List QueryResult))
 queryDB db str = do
   let queryFrame = encode (QueryMsg (MkQuery str))
   resp <- send (MkConnected (socket (conn db))) queryFrame
   case resp of
        (Left x) => pure (Left (ConnectionError x))
-       (Right x) => handleQueryResponse db
+       (Right x) => handleQueryResponses db
 
 -- Runs a query via the extended protocol (Parse/Bind/Describe/Execute/Sync)
 -- with text-encoded parameters, so caller-supplied values never need to be
 -- escaped/interpolated into the SQL string. Uses an unnamed statement and
--- portal - no prepared-statement caching/reuse across calls.
-execParams : DB -> String -> List (Maybe String) -> IO (Either PGError QueryResult)
+-- portal - no prepared-statement caching/reuse across calls. Postgres only
+-- allows a single statement per Parse, so this always yields one result.
+execParams : DB -> String -> List (Maybe String) -> IO (Either PGError (List QueryResult))
 execParams db query params = do
   let bindParams = map (map stringToBytes) params
       frame = encode (Parse "" query [])
@@ -64,15 +65,24 @@ execParams db query params = do
   resp <- send (MkConnected (socket (conn db))) frame
   case resp of
        (Left x) => pure (Left (ConnectionError x))
-       (Right x) => handleQueryResponse db
+       (Right x) => handleQueryResponses db
 
 
 -- Runs a query, choosing the simple protocol for zero-arg statements (e.g.
--- DDL) and the extended protocol otherwise, then reports the first server
--- error (if any) as a Left instead of a "successful" empty result.
-runQuery : DB -> String -> List (Maybe String) -> IO (Either PGError QueryResult)
+-- DDL) and the extended protocol otherwise.
+runQuery : DB -> String -> List (Maybe String) -> IO (Either PGError (List QueryResult))
 runQuery db stmt [] = queryDB db stmt
 runQuery db stmt params = execParams db stmt params
+
+-- execCommand/queryRows are single-statement APIs; a ';'-separated batch
+-- would otherwise have its results silently merged/corrupted, so this
+-- rejects anything other than exactly one result with a clear error instead.
+singleResult : List QueryResult -> Either PGError QueryResult
+singleResult [qr] = Right qr
+singleResult []   = Left (ProtocolError "no result returned for statement")
+singleResult xs   = Left (ProtocolError
+  ("expected exactly one statement's result, got " ++ show (length xs) ++
+   " - multi-statement SQL is not supported by execCommand/queryRows; use execMulti"))
 
 collectErrors : QueryResult -> Either PGError QueryResult
 collectErrors qr = case errors qr of
@@ -85,14 +95,22 @@ public export
 execCommand : DB -> String -> List (Maybe String) -> IO (Either PGError String)
 execCommand db stmt params = do
   result <- runQuery db stmt params
-  pure (result >>= collectErrors >>= \qr => Right (fromMaybe "" (commandTag qr)))
+  pure (result >>= singleResult >>= collectErrors >>= \qr => Right (fromMaybe "" (commandTag qr)))
 
 ||| Run a SELECT and return the decoded rows.
 public export
 queryRows : DB -> String -> List (Maybe String) -> IO (Either PGError (List Row))
 queryRows db stmt params = do
   result <- runQuery db stmt params
-  pure (result >>= collectErrors >>= \qr => Right (toRows qr))
+  pure (result >>= singleResult >>= collectErrors >>= \qr => Right (toRows qr))
+
+||| Run a (possibly ';'-separated, multi-statement) batch via the simple
+||| query protocol and get back one QueryResult per statement, in order.
+||| Parameters aren't supported here (the extended protocol only ever runs
+||| one statement per call) - use execCommand/queryRows for those.
+public export
+execMulti : DB -> String -> IO (Either PGError (List QueryResult))
+execMulti db stmt = queryDB db stmt
 
 public export
 closeDB : DB -> IO ()
