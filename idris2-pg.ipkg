@@ -20,6 +20,7 @@ bugtracker = "https://github.com/odunboye/idris2-pg/issues"
 -- modules to install
 modules = Network.Core
         , Network.RawSocket
+        , Network.Timeout
         , Data.PGTypes
         , Data.PGJson
         , Crypto.MD5

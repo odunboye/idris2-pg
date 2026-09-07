@@ -384,11 +384,30 @@ showQueryResult (MkQueryResult description rows commandTag status errors notices
 public export
 record PGConfig where
   constructor MkPGConfig
-  host     : String
-  port     : Int
-  user     : String
-  password : String
-  database : String
+  host             : String
+  port             : Int
+  user             : String
+  password         : String
+  database         : String
+  -- Bounds connectDB (the TCP connect plus the auth handshake) and, on a
+  -- listening connection, cancelQuery's own fresh connection - see
+  -- Network.Timeout for what "bounds" means here (the wait, not the
+  -- underlying socket). Nothing (the default via mkPGConfig) preserves the
+  -- old behavior: block indefinitely.
+  connectTimeoutMs : Maybe Nat
+  -- Bounds any single DB operation that waits on the server: execCommand/
+  -- queryRows/queryRowsBinary/execMulti, waitForNotification, copyOut/
+  -- copyIn. Nothing (the default via mkPGConfig) preserves the old
+  -- behavior: block indefinitely.
+  readTimeoutMs    : Maybe Nat
+
+||| Convenience constructor for the common case: no timeouts, i.e. the same
+||| block-indefinitely behavior this client always had. Use the MkPGConfig
+||| constructor (or record update syntax on a PGConfig it built) directly to
+||| set connectTimeoutMs/readTimeoutMs.
+public export
+mkPGConfig : (host : String) -> (port : Int) -> (user : String) -> (password : String) -> (database : String) -> PGConfig
+mkPGConfig host port user password database = MkPGConfig host port user password database Nothing Nothing
 
 public export
 record DB where

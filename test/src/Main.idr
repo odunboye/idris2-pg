@@ -27,7 +27,7 @@ testConfig = do
   user <- fromMaybe "testuser" <$> getEnv "PG_TEST_USER"
   password <- fromMaybe "testpass" <$> getEnv "PG_TEST_PASSWORD"
   database <- fromMaybe "testdb" <$> getEnv "PG_TEST_DB"
-  pure (MkPGConfig host port user password database)
+  pure (mkPGConfig host port user password database)
 
 testCrud : DB -> IO ()
 testCrud db = do
@@ -328,6 +328,30 @@ testCopy db = do
   _ <- execCommand db "DROP TABLE copy_demo" []
   pure ()
 
+testTimeouts : PGConfig -> IO ()
+testTimeouts cfg = do
+  -- readTimeoutMs: a query that runs longer than the timeout should return
+  -- a timeout error instead of blocking until the server actually replies.
+  let shortReadCfg = { readTimeoutMs := Just 500 } cfg
+  Right dbShortRead <- connectDB shortReadCfg
+    | Left err => putStrLn ("FAIL connect for read timeout test: " ++ displayError err)
+  slowResult <- queryRows dbShortRead "SELECT pg_sleep(2)" []
+  case slowResult of
+       Left (ConnectionError msg) => putStrLn ("OK readTimeoutMs times out a slow query: " ++ msg)
+       Left otherErr => putStrLn ("FAIL readTimeoutMs: expected a ConnectionError timeout, got a different PGError: " ++ displayError otherErr)
+       Right _        => putStrLn "FAIL readTimeoutMs: slow query completed within the timeout window (unexpected)"
+  closeDB dbShortRead
+
+  -- connectTimeoutMs: connecting to a non-routable test address (RFC 5737,
+  -- 192.0.2.0/24, guaranteed to never respond) should time out instead of
+  -- hanging until the OS's own much longer TCP connect timeout.
+  let unreachableCfg = { host := "192.0.2.1", connectTimeoutMs := Just 500 } cfg
+  connectResult <- connectDB unreachableCfg
+  case connectResult of
+       Left (ConnectionError msg) => putStrLn ("OK connectTimeoutMs times out an unreachable host: " ++ msg)
+       Left otherErr => putStrLn ("FAIL connectTimeoutMs: expected a ConnectionError timeout, got a different PGError: " ++ displayError otherErr)
+       Right _        => putStrLn "FAIL connectTimeoutMs: connected to a supposedly unreachable host"
+
 main : IO ()
 main = do
   cfg <- testConfig
@@ -344,5 +368,6 @@ main = do
   testPreparedCache db
   testBinaryFormat db
   testCopy db
+  testTimeouts cfg
   closeDB db
   putStrLn "OK done"

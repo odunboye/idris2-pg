@@ -8,11 +8,31 @@ import Data.PGValue
 import Helper
 import Network.Core
 import Network.RawSocket
+import Network.Timeout
 import Derive.Prelude
+
+-- Bounds a connect-shaped operation (connectDB's own TCP-connect-plus-auth,
+-- or cancelQuery's fresh out-of-band connection) by cfg's connectTimeoutMs,
+-- if set - see Network.Timeout for what "bounds" does and doesn't mean.
+withConnectTimeout : PGConfig -> IO (Either PGError a) -> IO (Either PGError a)
+withConnectTimeout cfg action = case connectTimeoutMs cfg of
+     Nothing => action
+     Just ms => do
+       res <- withTimeout ms action
+       pure (fromMaybe (Left (ConnectionError "connection timed out")) res)
+
+-- Bounds a single wire round-trip (a query, a COPY, a notification wait) by
+-- db's readTimeoutMs, if set.
+withReadTimeout : DB -> IO (Either PGError a) -> IO (Either PGError a)
+withReadTimeout db action = case readTimeoutMs (cfg db) of
+     Nothing => action
+     Just ms => do
+       res <- withTimeout ms action
+       pure (fromMaybe (Left (ConnectionError "operation timed out waiting for the server")) res)
 
 public export
 connectDB : PGConfig -> IO (Either PGError DB)
-connectDB cfg = do
+connectDB cfg = withConnectTimeout cfg $ do
   conn <- connectPG (host cfg) (port cfg)
   case conn of
        Nothing => pure (Left (ConnectionError "Could not connect"))
@@ -45,7 +65,7 @@ noteStatus db results = case reverse results of
                        Just (MkReadyForQuery s) => writeIORef (txState db) (Just s)
 
 queryDB : DB -> String -> IO (Either PGError (List QueryResult))
-queryDB db str = do
+queryDB db str = withReadTimeout db $ do
   let queryFrame = encode (QueryMsg (MkQuery str))
   resp <- send (MkConnected (socket (conn db))) queryFrame
   case resp of
@@ -87,7 +107,7 @@ execParams db query params wantBinary = do
     cacheStmt stmtName = modifyIORef (stmtCache db) ((query, stmtName) ::)
 
     runPrepared : String -> Bool -> IO (Either PGError (List QueryResult))
-    runPrepared stmtName isNew = do
+    runPrepared stmtName isNew = withReadTimeout db $ do
       let bindParams = map (map stringToBytes) params
           parseFrame = if isNew then encode (Parse stmtName query []) else []
           frame = parseFrame
@@ -224,17 +244,21 @@ unlistenChannel db channel = execCommand db ("UNLISTEN " ++ quoteIdent channel) 
 
 ||| Blocks until a NOTIFY arrives on any channel this connection is
 ||| listening to (see listenChannel), skipping over any other asynchronous
-||| message (a NoticeMsg, a ParameterStatus change) in between. This is a
-||| genuine indefinite block - there's no timeout support (see README).
+||| message (a NoticeMsg, a ParameterStatus change) in between. Bounded by
+||| DB.cfg's readTimeoutMs, if set (see Network.Timeout for what "bounded"
+||| means); blocks indefinitely otherwise.
 public export
 waitForNotification : DB -> IO (Either PGError Notification)
-waitForNotification db = do
-  frame <- readFrame (conn db)
-  case frame of
-       Left err                  => pure (Left (ConnectionError err))
-       Right (NotificationMsg n) => pure (Right n)
-       Right (ErrorMsg e)        => pure (Left (SqlError e))
-       Right _                   => waitForNotification db
+waitForNotification db = withReadTimeout db (go db)
+  where
+    go : DB -> IO (Either PGError Notification)
+    go db = do
+      frame <- readFrame (conn db)
+      case frame of
+           Left err                  => pure (Left (ConnectionError err))
+           Right (NotificationMsg n) => pure (Right n)
+           Right (ErrorMsg e)        => pure (Left (SqlError e))
+           Right _                   => go db
 
 ||| Requests the server abort whatever this connection is currently running.
 ||| Per the Postgres protocol, cancellation is out-of-band: this opens a
@@ -243,7 +267,7 @@ waitForNotification db = do
 public export
 cancelQuery : DB -> IO (Either PGError ())
 cancelQuery db = case map backendKey (result db) of
-  Just (Just bk) => do
+  Just (Just bk) => withConnectTimeout (cfg db) $ do
     conn <- connectPG (host (cfg db)) (port (cfg db))
     case conn of
          Nothing => pure (Left (ConnectionError "could not open cancel connection"))
@@ -260,7 +284,7 @@ cancelQuery db = case map backendKey (result db) of
 ||| query protocol, same as any other unparameterized statement.
 public export
 copyOut : DB -> String -> IO (Either PGError String)
-copyOut db sql = do
+copyOut db sql = withReadTimeout db $ do
   resp <- send (MkConnected (socket (conn db))) (encode (QueryMsg (MkQuery sql)))
   case resp of
        Left err => pure (Left (ConnectionError err))
@@ -285,7 +309,7 @@ copyOut db sql = do
 ||| command tag (e.g. "COPY 3") on success.
 public export
 copyIn : DB -> String -> String -> IO (Either PGError String)
-copyIn db sql payload = do
+copyIn db sql payload = withReadTimeout db $ do
   resp <- send (MkConnected (socket (conn db))) (encode (QueryMsg (MkQuery sql)))
   case resp of
        Left err => pure (Left (ConnectionError err))

@@ -6,6 +6,8 @@ import Helper
 import Crypto.MD5
 import Crypto.SCRAM
 import Data.PGValue
+import Network.Timeout
+import System
 
 check : Show a => Eq a => String -> a -> a -> IO ()
 check label expected actual =
@@ -254,6 +256,13 @@ main = do
   check "parseJSON trailing content rejected" True (isLeft (parseJSON "1 2"))
   check "parseJSON bad literal rejected" True (isLeft (parseJSON "nul"))
   check "getJSON" (Right (JObject [("a", JNumber 1.0)])) (getJSON (mkTextRow [("j", Just "{\"a\":1}")]) "j")
+
+  -- Network.Timeout: cooperative, thread-based withTimeout
+  fastResult <- withTimeout 200 (pure 42)
+  check "withTimeout returns the result when the action finishes in time" (Just 42) fastResult
+
+  slowResult <- withTimeout 30 (usleep 300000 *> pure 42)
+  check "withTimeout returns Nothing when the action doesn't finish in time" Nothing slowResult
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True

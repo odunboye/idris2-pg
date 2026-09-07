@@ -49,7 +49,7 @@ import Data.PGValue
 
 main : IO ()
 main = do
-  let cfg = MkPGConfig "127.0.0.1" 5432 "myuser" "mypassword" "mydb"
+  let cfg = mkPGConfig "127.0.0.1" 5432 "myuser" "mypassword" "mydb"
   Right db <- connectDB cfg
     | Left err => putStrLn (displayError err)
 
@@ -103,6 +103,34 @@ since binary formats don't self-describe their type the way text does.
 Binary-format parameter *sending* isn't implemented — parameters are
 always sent as text, which Postgres accepts and casts correctly for every
 type.
+
+### Timeouts
+
+`PGConfig` has `connectTimeoutMs`/`readTimeoutMs : Maybe Nat` fields, both
+`Nothing` (block indefinitely, the old behavior) by default via
+`mkPGConfig`; set them with record update syntax, e.g.
+`{ readTimeoutMs := Just 5000 } cfg`. `connectTimeoutMs` bounds `connectDB`
+(the TCP connect plus the auth handshake) and `cancelQuery`'s own
+out-of-band connection; `readTimeoutMs` bounds any single call that waits
+on the server (`execCommand`/`queryRows`/`queryRowsBinary`/`execMulti`,
+`waitForNotification`, `copyOut`/`copyIn`).
+
+These are **not** OS-level socket timeouts (`SO_RCVTIMEO`/a non-blocking
+`connect()`) — Idris2's `network` package has no support for those at all,
+and adding it would mean shipping a hand-written C shared library that
+every consumer of this package would need to compile before `pack build`
+even works, which felt like too large a regression to how easy this
+package is to install today. Instead, `Network.Timeout` races the
+underlying call against a timer on a background thread (`fork` +
+`Channel`, both already part of Idris2's base install — no new
+dependency), and returns as soon as either finishes. That bounds how long
+the *caller* waits, but not the underlying resource: if the timed-out call
+was a blocking syscall stuck on a truly unresponsive server, timing out
+here does not close the socket or interrupt that syscall — the abandoned
+call keeps running in the background (harmlessly; its result, if any, is
+just never read) until the OS's own TCP retry limit gives up, or the
+process exits. A connection whose read has timed out should be treated as
+unusable and reconnected, not reused.
 
 ### Errors
 
@@ -183,8 +211,10 @@ variants (SCRAM and MD5) on every push/PR.
 - [x] LISTEN/NOTIFY (`listenChannel`/`unlistenChannel`/`waitForNotification`)
       — use a connection dedicated to listening, since `waitForNotification`
       blocks it until a notification arrives; it can't run other queries
-      meanwhile (there's no timeout to bound that wait - see below).
+      meanwhile; that wait can be bounded with `readTimeoutMs` (see
+      "Timeouts" below).
+- [x] Read/connect timeouts (`PGConfig.connectTimeoutMs`/`readTimeoutMs`) —
+      cooperative, thread-based (`Network.Timeout`), not OS-level socket
+      timeouts; see "Timeouts" above for exactly what that does and
+      doesn't bound.
 - [ ] TLS/SSL — the underlying socket layer has no TLS support at all.
-- [ ] Read/connect timeouts — a hung or unresponsive server (or a listening
-      connection with nothing to notify it) can block a call indefinitely;
-      there's no way to bound that today.
