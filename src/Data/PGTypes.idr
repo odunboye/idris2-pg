@@ -90,18 +90,22 @@ data PGAuthResponseTag
   = AuthOk
   | AuthCleartext
   | AuthMD5 Bytes
-  | AuthSASL
+  | AuthSASL Bytes           -- code 10: raw mechanism-list bytes (parsed in Helper.idr, which has decodeCString)
+  | AuthSASLContinue Bytes   -- code 11: raw server-first-message bytes
+  | AuthSASLFinal Bytes      -- code 12: raw server-final-message bytes
   | AuthUnknown Int
 %runElab derive "PGAuthResponseTag" [Show, Eq]
 
 public export
 parseAuthResponse : Int -> Bytes -> PGAuthResponseTag
-parseAuthResponse i salt =
+parseAuthResponse i rest =
   case i of
     0  => AuthOk
     3  => AuthCleartext
-    5  => AuthMD5 salt
-    10 => AuthSASL
+    5  => AuthMD5 rest
+    10 => AuthSASL rest
+    11 => AuthSASLContinue rest
+    12 => AuthSASLFinal rest
     n  => AuthUnknown n
 
 public export
@@ -277,6 +281,11 @@ data PGMsg
   = StartupMsg Int (List (String, String))
   | QueryMsg Query
   | PasswordMessage String
+  -- SCRAM-SHA-256 (RFC 5802/7677): both wire-encode to tag 'p', same as
+  -- PasswordMessage - which one the server expects depends on which
+  -- authentication method it requested, not a different tag byte.
+  | SASLInitialResponse String Bytes  -- mechanism name, initial response data
+  | SASLResponse Bytes                -- response data (no mechanism name this time)
   | Terminate
   -- Extended query protocol (parameterized queries): unnamed statement/portal
   -- names ("") are used throughout since this client doesn't cache/reuse

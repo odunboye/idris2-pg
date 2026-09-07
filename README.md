@@ -124,26 +124,35 @@ pack build unit-test.ipkg
 
 CRUD smoke test (needs a real Postgres — connection details come from
 `PG_TEST_HOST`/`PG_TEST_PORT`/`PG_TEST_USER`/`PG_TEST_PASSWORD`/`PG_TEST_DB`,
-defaulting to `127.0.0.1:5432`/`testuser`/`testpass`/`testdb`):
+defaulting to `127.0.0.1:5432`/`testuser`/`testpass`/`testdb`). A plain
+default Postgres container already works, since SCRAM-SHA-256 (the
+out-of-the-box default) is supported:
 
 ```sh
 docker run -d --name idris2-pg-test \
   -e POSTGRES_USER=testuser -e POSTGRES_PASSWORD=testpass -e POSTGRES_DB=testdb \
-  -e POSTGRES_HOST_AUTH_METHOD=md5 -p 5432:5432 postgres:16
-
-# Postgres 14+ defaults to scram-sha-256 password storage even when
-# pg_hba.conf says "md5" - force real MD5 auth to match what this client
-# supports:
-psql -h 127.0.0.1 -U testuser -d testdb -c "ALTER SYSTEM SET password_encryption = 'md5';"
-psql -h 127.0.0.1 -U testuser -d testdb -c "SELECT pg_reload_conf();"
-psql -h 127.0.0.1 -U testuser -d testdb -c "ALTER USER testuser WITH PASSWORD 'testpass';"
+  -p 5432:5432 postgres:16
 
 cd test
 pack build test.ipkg
 ./build/exec/idris2-pg-test
 ```
 
-CI (`.github/workflows/ci.yml`) runs both on every push/PR.
+To exercise the MD5 path instead (also supported, but not the default since
+Postgres 14), force `md5` password storage first:
+
+```sh
+docker run -d --name idris2-pg-test-md5 \
+  -e POSTGRES_USER=testuser -e POSTGRES_PASSWORD=testpass -e POSTGRES_DB=testdb \
+  -e POSTGRES_HOST_AUTH_METHOD=md5 -p 5432:5432 postgres:16
+
+psql -h 127.0.0.1 -U testuser -d testdb -c "ALTER SYSTEM SET password_encryption = 'md5';"
+psql -h 127.0.0.1 -U testuser -d testdb -c "SELECT pg_reload_conf();"
+psql -h 127.0.0.1 -U testuser -d testdb -c "ALTER USER testuser WITH PASSWORD 'testpass';"
+```
+
+CI (`.github/workflows/ci.yml`) runs the unit tests plus both smoke test
+variants (SCRAM and MD5) on every push/PR.
 
 ## Features
 
@@ -163,9 +172,14 @@ CI (`.github/workflows/ci.yml`) runs both on every push/PR.
       `COPY ... TO STDOUT`/`COPY ... FROM STDIN`, text format. `copyIn`
       sends the whole payload as a single CopyData message rather than
       chunking it.
-- [ ] SCRAM-SHA-256 auth — Postgres 14+'s default for new roles. Only
-      trust/md5/cleartext are implemented; a role authenticating against this
-      client needs `password_encryption = md5` (see above) or `trust`.
+- [x] SCRAM-SHA-256 auth — Postgres 14+'s default for new roles, built
+      entirely from scratch (`Crypto.SHA256`, `Crypto.SCRAM`: HMAC-SHA256,
+      PBKDF2, base64, the full RFC 5802 handshake including verifying the
+      server's final signature). The client nonce comes from `contrib`'s
+      `System.Random` (Chez's standard PRNG) - fine here since the nonce
+      only needs to be unique, not secret, per RFC 5802. No channel binding
+      (`SCRAM-SHA-256-PLUS`) - this client doesn't use TLS, which is what
+      channel binding ties to.
 - [x] LISTEN/NOTIFY (`listenChannel`/`unlistenChannel`/`waitForNotification`)
       — use a connection dedicated to listening, since `waitForNotification`
       blocks it until a notification arrives; it can't run other queries

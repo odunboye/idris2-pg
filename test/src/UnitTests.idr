@@ -4,6 +4,7 @@ import Data.List
 import Data.PGTypes
 import Helper
 import Crypto.MD5
+import Crypto.SCRAM
 import Data.PGValue
 
 check : Show a => Eq a => String -> a -> a -> IO ()
@@ -48,6 +49,25 @@ main = do
     (toHex (md5 (strBytes "12345678901234567890123456789012345678901234567890123456789012345678901234567890")))
   check "md5 pangram"  "9e107d9d372bb6826bd81d3542a419d6"
     (toHex (md5 (strBytes "The quick brown fox jumps over the lazy dog")))
+
+  -- SCRAM-SHA-256 building blocks (against Python hashlib/hmac/base64
+  -- reference values)
+  check "hmac-sha256" "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+    (toHex (hmacSha256 (strBytes "key") (strBytes "The quick brown fox jumps over the lazy dog")))
+  check "pbkdf2-hmac-sha256 1 iter" "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+    (toHex (pbkdf2Sha256 (strBytes "password") (strBytes "salt") 1))
+  check "pbkdf2-hmac-sha256 4096 iters" "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+    (toHex (pbkdf2Sha256 (strBytes "password") (strBytes "salt") 4096))
+  check "base64Encode empty" "" (base64Encode [])
+  check "base64Encode foobar" "Zm9vYmFy" (base64Encode (strBytes "foobar"))
+  check "base64Encode padding 1" "Zm8=" (base64Encode (strBytes "fo"))
+  check "base64Encode padding 2" "Zg==" (base64Encode (strBytes "f"))
+  check "base64Decode foobar" (Just (strBytes "foobar")) (base64Decode "Zm9vYmFy")
+  check "base64 roundtrip" (Just [0 .. 17]) (base64Decode (base64Encode [0 .. 17]))
+  check "parseServerFirstMessage"
+    (Just (MkServerFirstMessage "abc123" (strBytes "salty") 4096))
+    (parseServerFirstMessage ("r=abc123,s=" ++ base64Encode (strBytes "salty") ++ ",i=4096"))
+  check "parseServerFirstMessage malformed" Nothing (parseServerFirstMessage "not,a,valid,message")
 
   -- encode: client-to-server messages
   checkFrame "QueryMsg" 0x51

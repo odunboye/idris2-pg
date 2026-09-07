@@ -8,6 +8,7 @@ import Data.PGTypes
 import Network.Core
 import Network.RawSocket
 import Crypto.MD5
+import Crypto.SCRAM
 import Derive.Prelude
 
 
@@ -270,6 +271,15 @@ encode (PasswordMessage pw) =
       len = 4 + length payload
   in [0x70] ++ encodeInt32 (cast len) ++ payload  -- 'p'
 
+encode (SASLInitialResponse mechanism responseData) =
+  let payload = encodeCString mechanism ++ encodeInt32 (cast (length responseData)) ++ responseData
+      len = 4 + length payload
+  in [0x70] ++ encodeInt32 (cast len) ++ payload  -- 'p'
+
+encode (SASLResponse responseData) =
+  let len = 4 + length responseData
+  in [0x70] ++ encodeInt32 (cast len) ++ responseData  -- 'p'
+
 encode Terminate = [0x58] ++ encodeInt32 4  -- 'X', no payload
 
 encode (Parse stmtName query paramTypes) =
@@ -446,8 +456,23 @@ startupstep acc _                     = acc
 
 
 public export
+-- Only tracked between AuthenticationSASL and AuthenticationSASLFinal - see
+-- handleStartupResponse's SCRAM branches below.
+data ScramProgress
+  = ScramNotStarted
+  | ScramAwaitingServerFirst String String  -- client nonce, client-first-message-bare
+  | ScramAwaitingServerFinal Bytes          -- expected ServerSignature
+
+-- SASL mechanism-list payload: null-terminated strings, no extra wrapping.
+offersScramSha256 : Bytes -> Bool
+offersScramSha256 bs = case decodeCString bs of
+     Right ("SCRAM-SHA-256", _) => True
+     Right (_, rest)            => offersScramSha256 rest
+     Left _                     => False
+
+public export
 handleStartupResponse : (user : String) -> (password : String) -> PGConnection Connected -> IO (Either PGError StartupResult)
-handleStartupResponse user password conn = go init
+handleStartupResponse user password conn = go ScramNotStarted init
   where
     init : StartupResult
     init = MkStartupResult Nothing [] Nothing Nothing [] []
@@ -464,31 +489,73 @@ handleStartupResponse user password conn = go init
            Left err => pure (Left (ConnectionError err))
            Right () => pure (Right ())
 
-    go : StartupResult -> IO (Either PGError StartupResult)
-    go acc = do
+    sendFrame : Bytes -> IO (Either PGError ())
+    sendFrame bytes = do
+      res <- send (MkConnected (socket conn)) bytes
+      case res of
+           Left err => pure (Left (ConnectionError err))
+           Right () => pure (Right ())
+
+    go : ScramProgress -> StartupResult -> IO (Either PGError StartupResult)
+    go scram acc = do
       bs <- readFrame conn
       case bs of
         Left err => pure (Left (ConnectionError err))
         Right msg =>
               case msg of
                 ReadyForQueryMsg r => pure (Right ({ ready := Just (MkReadyForQuery r) } acc))
-                AuthenticationMsg AuthOk => go ({ authState := Just AuthOk } acc)
+                AuthenticationMsg AuthOk => go scram ({ authState := Just AuthOk } acc)
                 AuthenticationMsg AuthCleartext => do
                   sent <- sendPassword password
                   case sent of
                        Left err => pure (Left err)
-                       Right () => go ({ authState := Just AuthCleartext } acc)
+                       Right () => go scram ({ authState := Just AuthCleartext } acc)
                 AuthenticationMsg (AuthMD5 salt) => do
                   let hashed = pgMD5Password password user salt
                   sent <- sendPassword hashed
                   case sent of
                        Left err => pure (Left err)
-                       Right () => go ({ authState := Just (AuthMD5 salt) } acc)
-                AuthenticationMsg AuthSASL =>
-                  unsupported "SCRAM-SHA-256 (SASL) authentication is not supported"
+                       Right () => go scram ({ authState := Just (AuthMD5 salt) } acc)
+
+                AuthenticationMsg (AuthSASL mechs) =>
+                  if not (offersScramSha256 mechs)
+                     then unsupported "server does not offer SCRAM-SHA-256 (only mechanism supported here)"
+                     else do
+                       clientNonce <- genClientNonce
+                       let bare = clientFirstMessageBare clientNonce
+                           full = clientFirstMessage clientNonce
+                       sent <- sendFrame (encode (SASLInitialResponse "SCRAM-SHA-256" (stringToBytes full)))
+                       case sent of
+                            Left err => pure (Left err)
+                            Right () => go (ScramAwaitingServerFirst clientNonce bare) (startupstep acc msg)
+
+                AuthenticationMsg (AuthSASLContinue contBytes) =>
+                  case scram of
+                       ScramAwaitingServerFirst clientNonce bare =>
+                         let serverFirstRaw = bytesToString contBytes
+                         in case parseServerFirstMessage serverFirstRaw of
+                                 Nothing => unsupported "malformed SCRAM server-first-message"
+                                 Just sf =>
+                                   case computeClientFinal password clientNonce bare serverFirstRaw sf of
+                                        Nothing => unsupported "SCRAM server nonce does not extend the client nonce"
+                                        Just cf => do
+                                          sent <- sendFrame (encode (SASLResponse (stringToBytes (message cf))))
+                                          case sent of
+                                               Left err => pure (Left err)
+                                               Right () => go (ScramAwaitingServerFinal (expectedServerSignature cf)) (startupstep acc msg)
+                       _ => unsupported "unexpected SCRAM server-first-message"
+
+                AuthenticationMsg (AuthSASLFinal finalBytes) =>
+                  case scram of
+                       ScramAwaitingServerFinal expectedSig =>
+                         if verifyServerFinal (bytesToString finalBytes) expectedSig
+                            then go scram (startupstep acc msg)
+                            else unsupported "SCRAM server signature verification failed (possible MITM or protocol error)"
+                       _ => unsupported "unexpected SCRAM server-final-message"
+
                 AuthenticationMsg (AuthUnknown n) =>
                   unsupported ("Unsupported authentication method: " ++ show n)
-                _                  => go (startupstep acc msg)
+                _                  => go scram (startupstep acc msg)
 
 
 querystep : QueryResult -> PGMsg -> QueryResult

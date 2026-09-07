@@ -15,6 +15,7 @@ bugtracker = "https://github.com/odunboye/idris2-pg/issues"
 -- packages to add to search path
  depends = network
         ,  elab-util
+        ,  contrib
 
 -- modules to install
 modules = Network.Core
@@ -22,6 +23,8 @@ modules = Network.Core
         , Data.PGTypes
         , Data.PGJson
         , Crypto.MD5
+        , Crypto.SHA256
+        , Crypto.SCRAM
         , Helper
         , Data.PGBinary
         , Data.PGValue

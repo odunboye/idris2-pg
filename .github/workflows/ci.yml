@@ -76,3 +76,42 @@ jobs:
           pack build test.ipkg
           ./build/exec/idris2-pg-test | tee crud-test-output.txt
           ! grep -q '^FAIL' crud-test-output.txt
+
+  # Same smoke test again, but against Postgres's actual out-of-the-box
+  # default (scram-sha-256 password_encryption + pg_hba.conf) - no setup
+  # step needed here, unlike the md5 job above.
+  live-crud-test-scram:
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build idris2-pg
+        run: pack build idris2-pg.ipkg
+
+      - name: Build and run the CRUD smoke test
+        working-directory: test
+        env:
+          PG_TEST_HOST: postgres
+          PG_TEST_PORT: "5432"
+          PG_TEST_USER: testuser
+          PG_TEST_PASSWORD: testpass
+          PG_TEST_DB: testdb
+        run: |
+          pack build test.ipkg
+          ./build/exec/idris2-pg-test | tee crud-test-output.txt
+          ! grep -q '^FAIL' crud-test-output.txt
