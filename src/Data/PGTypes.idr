@@ -84,7 +84,7 @@ data PGAuthResponseTag
   | AuthMD5 Bytes
   | AuthSASL
   | AuthUnknown Int
-%runElab derive "PGAuthResponseTag" [Show]
+%runElab derive "PGAuthResponseTag" [Show, Eq]
 
 public export
 parseAuthResponse : Int -> Bytes -> PGAuthResponseTag
@@ -290,7 +290,7 @@ data PGMsg
   | ParameterDescriptionMsg (List Int)
   | NotificationMsg Notification
   | UnknownMsg Tag Bytes
-%runElab derive "PGMsg" [Show]
+%runElab derive "PGMsg" [Show, Eq]
 
 
 public export

@@ -190,5 +190,22 @@ main = do
        other => putStrLn ("FAIL: expected a matching NotificationMsg, got: " ++ show other)
   closeDB dbListener
 
+  -- Regression test for the decodeInt32 sign-extension bug the unit tests
+  -- caught (a NULL's -1 length marker was decoding as 4294967295, which
+  -- would corrupt the rest of the row): a NULL bound as a parameter, and a
+  -- NULL selected back, must both round-trip correctly alongside a real
+  -- value in the same row.
+  Right _ <- execCommand db "CREATE TABLE null_demo (a TEXT, b TEXT)" []
+    | Left err => putStrLn ("FAIL create null_demo: " ++ displayError err)
+  Right _ <- execCommand db "INSERT INTO null_demo (a, b) VALUES ($1, $2)" [Just "present", Nothing]
+    | Left err => putStrLn ("FAIL insert null_demo: " ++ displayError err)
+  Right [nullRow] <- queryRows db "SELECT a, b FROM null_demo" []
+    | Left err => putStrLn ("FAIL select null_demo: " ++ displayError err)
+    | Right rs => putStrLn ("FAIL: unexpected row count for null_demo: " ++ show rs)
+  case (columnByName nullRow "a", columnByName nullRow "b") of
+       (Just (Just "present"), Just Nothing) => putStrLn "OK NULL round-trips correctly alongside a real value"
+       vals => putStrLn ("FAIL null_demo values: " ++ show vals)
+  _ <- execCommand db "DROP TABLE null_demo" []
+
   closeDB db
   putStrLn "OK done"

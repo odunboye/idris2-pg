@@ -55,19 +55,32 @@ encodeInt32 n =
   ]
 
 public export
+-- `Int` is 64-bit here, so the raw accumulated value is always non-negative
+-- and must be re-interpreted as a signed 16/32-bit two's-complement value
+-- (Postgres uses negative Int16/Int32 wire values for real, e.g. a NULL
+-- Bind parameter or DataRow column is length -1, and a variable-length
+-- column's RowDescription typeSize is -1) or values like that decode wrong
+-- (previously: -1 came back as 65535 / 4294967295).
 decodeInt16 : List Bits8 -> Either String (Int, List Bits8)
 decodeInt16 (b1 :: b2 :: rest) =
-  Right (shiftL (cast b1) 8 + cast b2, rest)
+  let raw : Int
+      raw = shiftL (cast b1) 8 + cast b2
+      signed : Int
+      signed = if raw >= 0x8000 then raw - 0x10000 else raw
+  in Right (signed, rest)
 decodeInt16 _ = Left "decodeInt16: insufficient bytes"
 
 public export
 decodeInt32 : List Bits8 -> Either String (Int, List Bits8)
 decodeInt32 (b1 :: b2 :: b3 :: b4 :: rest) =
-  Right ( shiftL (cast b1) 24
-        + shiftL (cast b2) 16
-        + shiftL (cast b3) 8
-        + cast b4
-        , rest)
+  let raw : Int
+      raw = shiftL (cast b1) 24
+          + shiftL (cast b2) 16
+          + shiftL (cast b3) 8
+          + cast b4
+      signed : Int
+      signed = if raw >= 0x80000000 then raw - 0x100000000 else raw
+  in Right (signed, rest)
 decodeInt32 _ = Left "decodeInt32: insufficient bytes"
 
 -- Encode/decode null-terminated UTF8 string
