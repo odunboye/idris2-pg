@@ -204,6 +204,38 @@ withTransaction db action = do
        Right _ => do _ <- commitTx db; pure result
        Left _  => do _ <- rollbackTx db; pure result
 
+quoteIdent : String -> String
+quoteIdent s = "\"" ++ pack (concatMap escapeChar (unpack s)) ++ "\""
+  where
+    escapeChar : Char -> List Char
+    escapeChar '"' = ['"', '"']
+    escapeChar c   = [c]
+
+||| Starts listening for NOTIFY on `channel` on this connection. Use a
+||| connection dedicated to listening - waitForNotification blocks it until
+||| a notification arrives, so it can't run other queries meanwhile.
+public export
+listenChannel : DB -> String -> IO (Either PGError String)
+listenChannel db channel = execCommand db ("LISTEN " ++ quoteIdent channel) []
+
+public export
+unlistenChannel : DB -> String -> IO (Either PGError String)
+unlistenChannel db channel = execCommand db ("UNLISTEN " ++ quoteIdent channel) []
+
+||| Blocks until a NOTIFY arrives on any channel this connection is
+||| listening to (see listenChannel), skipping over any other asynchronous
+||| message (a NoticeMsg, a ParameterStatus change) in between. This is a
+||| genuine indefinite block - there's no timeout support (see README).
+public export
+waitForNotification : DB -> IO (Either PGError Notification)
+waitForNotification db = do
+  frame <- readFrame (conn db)
+  case frame of
+       Left err                  => pure (Left (ConnectionError err))
+       Right (NotificationMsg n) => pure (Right n)
+       Right (ErrorMsg e)        => pure (Left (SqlError e))
+       Right _                   => waitForNotification db
+
 ||| Requests the server abort whatever this connection is currently running.
 ||| Per the Postgres protocol, cancellation is out-of-band: this opens a
 ||| fresh connection to send the CancelRequest on (no response is sent

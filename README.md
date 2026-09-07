@@ -166,10 +166,11 @@ CI (`.github/workflows/ci.yml`) runs both on every push/PR.
 - [ ] SCRAM-SHA-256 auth — Postgres 14+'s default for new roles. Only
       trust/md5/cleartext are implemented; a role authenticating against this
       client needs `password_encryption = md5` (see above) or `trust`.
+- [x] LISTEN/NOTIFY (`listenChannel`/`unlistenChannel`/`waitForNotification`)
+      — use a connection dedicated to listening, since `waitForNotification`
+      blocks it until a notification arrives; it can't run other queries
+      meanwhile (there's no timeout to bound that wait - see below).
 - [ ] TLS/SSL — the underlying socket layer has no TLS support at all.
-- [ ] Read/connect timeouts — a hung or unresponsive server can block a call
-      indefinitely; there's no way to bound that today.
-- [ ] LISTEN/NOTIFY consumption — decoding works, but nothing exposes a way
-      to `LISTEN` and then wait for/consume notifications without blocking
-      on an unrelated query's response; that needs the read-timeout work
-      above to do well.
+- [ ] Read/connect timeouts — a hung or unresponsive server (or a listening
+      connection with nothing to notify it) can block a call indefinitely;
+      there's no way to bound that today.
