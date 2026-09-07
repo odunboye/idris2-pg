@@ -194,23 +194,27 @@ record BackendKeyData where
 public export
 record Error where
   constructor MkError
-  error : String 
+  severity : Maybe String
+  code     : Maybe String
+  message  : String
 %runElab derive "Error" [Show, Eq]
 
 public export
 record Query  where
   constructor MkQuery
-  body : String 
+  body : String
 
 CommandComplete : Type
-CommandComplete = String 
+CommandComplete = String
 
+public export
 record NoticeField where
   constructor MkField
   tag : Char
   value : String
 %runElab derive "NoticeField" [Show, Eq]
 
+public export
 record Notice where
   constructor MkNotice
   fields : List NoticeField
@@ -229,6 +233,12 @@ data PGMsg
   | RowDescriptionMsg  RowDescription
   | CommandCompleteMsg String
   | NoticeMsg Notice
+  | ParseCompleteMsg
+  | BindCompleteMsg
+  | CloseCompleteMsg
+  | PortalSuspendedMsg
+  | EmptyQueryResponseMsg
+  | ParameterDescriptionMsg (List Int)
   | UnknownMsg Tag Bytes
 -- %runElab derive "PGMsg" [Show]
 

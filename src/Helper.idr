@@ -3,6 +3,7 @@ module Helper
 import Network.Socket
 import Data.Bits
 import Data.List
+import Data.Maybe
 import Data.PGTypes
 import Network.Core
 import Network.RawSocket
@@ -104,6 +105,34 @@ decodeRowDescFields n bs = do
   more <- decodeRowDescFields (n - 1) rest
   pure (field :: more)
 
+-- ErrorResponse/NoticeResponse payload: a sequence of (1-byte field code,
+-- null-terminated string) pairs, terminated by a final 0x00 byte.
+public export
+decodeNoticeFields : Bytes -> Either String (List NoticeField)
+decodeNoticeFields [] = Right []
+decodeNoticeFields (0 :: _) = Right []
+decodeNoticeFields (tagByte :: rest) = do
+  (val, afterVal) <- decodeCString rest
+  more <- decodeNoticeFields afterVal
+  Right (MkField (chr (cast tagByte)) val :: more)
+
+fieldValue : Char -> List NoticeField -> Maybe String
+fieldValue c [] = Nothing
+fieldValue c (f :: fs) = if tag f == c then Just (value f) else fieldValue c fs
+
+public export
+mkError : List NoticeField -> Error
+mkError fields = MkError (fieldValue 'S' fields) (fieldValue 'C' fields)
+                          (fromMaybe "" (fieldValue 'M' fields))
+
+public export
+decodeInt32List : Nat -> Bytes -> Either String (List Int)
+decodeInt32List Z bs = Right []
+decodeInt32List (S k) bs = do
+  (oid, rest) <- decodeInt32 bs
+  more <- decodeInt32List k rest
+  Right (oid :: more)
+
 
 public export
 readFrameBit : (PGConnection Connected) -> IO (Either String FrameBytes)
@@ -182,8 +211,7 @@ public export
 decode : FrameBytes -> Either String PGMsg
 decode (MkFrameBytes [] len payload) = Left "Tag is Empty"
 decode (MkFrameBytes (x :: xs) [] payload) = Left "Length is Empty"
-decode (MkFrameBytes (x :: xs) (y :: ys) []) = Left "Payload is Empty"
-decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do 
+decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do
   case tagFromString (bytesToString [tag]) of
        AuthenticationTag => case decodeInt32 payload of
             Right (authCode, _) => Right (AuthenticationMsg (parseAuthResponse authCode "someAutcode"))
@@ -196,8 +224,8 @@ decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do
                 Left e => Left e
             Left e => Left e
 
-       BindCompleteTag => ?splitVal_2
-       CloseCompleteTag => ?splitVal_3
+       BindCompleteTag => Right BindCompleteMsg
+       CloseCompleteTag => Right CloseCompleteMsg
 
        CommandCompleteTag => case decodeCString payload of
             Right (s, _) => Right (CommandCompleteMsg s)
@@ -211,11 +239,24 @@ decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do
               (Right x) => Right (DataRowMsg (MkDataRow nCols x))
 
 
-       EmptyQueryResponseTag => ?splitVal_6
-       ErrorResponseTag => ?splitVal_7
-       NoticeResponseTag => ?splitVal_8
-       NotificationResponseTag => ?splitVal_9
-       ParameterDescriptionTag => ?splitVal_10
+       EmptyQueryResponseTag => Right EmptyQueryResponseMsg
+
+       ErrorResponseTag => case decodeNoticeFields payload of
+            Right fields => Right (ErrorMsg (mkError fields))
+            Left e => Left e
+
+       NoticeResponseTag => case decodeNoticeFields payload of
+            Right fields => Right (NoticeMsg (MkNotice fields))
+            Left e => Left e
+
+       NotificationResponseTag => Right (UnknownMsg NotificationResponseTag payload)
+
+       ParameterDescriptionTag => case decodeInt16 payload of
+            Right (n, rest) => case decodeInt32List (cast n) rest of
+                 Right oids => Right (ParameterDescriptionMsg oids)
+                 Left e => Left e
+            Left e => Left e
+
        ParameterStatusTag => case decodeCString payload of
             Right (key, afterKey) =>
               case decodeCString afterKey of
@@ -223,8 +264,8 @@ decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do
                 Left e => Left e
             Left e => Left e
 
-       ParseCompleteTag => ?splitVal_12
-       PortalSuspendedTag => ?splitVal_13
+       ParseCompleteTag => Right ParseCompleteMsg
+       PortalSuspendedTag => Right PortalSuspendedMsg
        ReadyForQueryTag => do
           case payload of
             [b] => Right (ReadyForQueryMsg (fromByte b))
@@ -237,8 +278,8 @@ decode (MkFrameBytes (tag :: xs) (y :: ys) payload) = do
                 Nothing => Left "Failed to parse RowDescription fields"
             Left e => Left e
 
-       QueryTag => ?splitVal_16
-       (UnknownTag str) => ?splitVal_17
+       QueryTag => Right (UnknownMsg QueryTag payload)
+       (UnknownTag str) => Right (UnknownMsg (UnknownTag str) payload)
 
 public export
 readFrame : PGConnection Connected -> IO (Either String PGMsg)
@@ -285,7 +326,7 @@ handleStartupResponse conn = go init
     go acc = do
       bs <- readFrame conn
       case bs of
-        Left err => pure ( { errors := acc.errors ++ [MkError err] } acc )
+        Left err => pure ( { errors := acc.errors ++ [MkError Nothing Nothing err] } acc )
         Right msg =>
               case msg of
                 ReadyForQueryMsg r => pure ({ ready := Just (MkReadyForQuery r) } acc)
@@ -314,11 +355,7 @@ handleQueryResponse db = go (MkQueryResult Nothing [] Nothing Nothing [] [])
     go acc = do
       bs <- readFrame (conn db)
       case bs of
-           (Left x) => putStrLn x
-           (Right (DataRowMsg x)) => putStrLn ("Decoded Row >>> " ++ show x)
-           (Right _) =>putStrLn (">>>>>>>>>>> ")
-      case bs of
-        Left err => pure ({ errors := acc.errors ++ [MkError err] } acc)
+        Left err => pure ({ errors := acc.errors ++ [MkError Nothing Nothing err] } acc)
         Right msg =>
               case msg of
                 ReadyForQueryMsg r => pure ({ status := Just (MkReadyForQuery r) } acc)
