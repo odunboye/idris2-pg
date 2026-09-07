@@ -96,7 +96,7 @@ queryRows db stmt params = do
   result <- runQuery db stmt params
   pure (result >>= collectErrors >>= \qr => Right (toRows qr))
 
---closeDB
+public export
 closeDB : DB -> IO ()
 closeDB (MkDB (MkPGConnection socket _) _) = do
   _ <- send (MkConnected socket) (encode Terminate)
