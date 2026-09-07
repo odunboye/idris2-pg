@@ -5,6 +5,7 @@ import Data.PGTypes
 import Helper
 import Crypto.MD5
 import Crypto.SCRAM
+import Crypto.Curve25519
 import Data.PGValue
 import Network.Timeout
 import System
@@ -17,6 +18,16 @@ check label expected actual =
 
 strBytes : String -> List Bits8
 strBytes s = map (cast . ord) (unpack s)
+
+hexToBytes : String -> List Bits8
+hexToBytes s = go (unpack s)
+  where
+    hexVal : Char -> Int
+    hexVal c = if c >= '0' && c <= '9' then cast (ord c - ord '0')
+               else cast (ord c - ord 'a' + 10)
+    go : List Char -> List Bits8
+    go (a :: b :: rest) = cast (hexVal a * 16 + hexVal b) :: go rest
+    go _                = []
 
 mkTextRow : List (String, Maybe String) -> Row
 mkTextRow cols = MkRow (map (\(n, v) => (n, FmtText, map strBytes v)) cols)
@@ -263,6 +274,18 @@ main = do
 
   slowResult <- withTimeout 30 (usleep 300000 *> pure 42)
   check "withTimeout returns Nothing when the action doesn't finish in time" Nothing slowResult
+
+  -- Crypto.Curve25519 (X25519), against an independently-generated
+  -- reference keypair/shared-secret (Python's `cryptography` library).
+  let aPriv = hexToBytes "688e97675f7f17372b550e3d50d9af6411ff9ee2b0cb593f6a150e2d15906869"
+  let bPriv = hexToBytes "00d31c383ff407c5fb7edd098d04163c52aa53445d50edf49bbc140150f9de7e"
+  let aPub  = "4dddffba9a7e257049f70257d01146840c11ff05a6ca7a84ba1fb7053fd0f224"
+  let bPub  = "f65fddc114cff1c1dd63df8a61c88d7f3c4654da564605bb9d491d09124e2d68"
+  let shared = "c3087a54de22e311b6744865dbfd631f424a89ab7ae6fde3ddae9b6f3746e30e"
+  check "x25519PublicKey derives Alice's public key" aPub (toHex (x25519PublicKey aPriv))
+  check "x25519PublicKey derives Bob's public key" bPub (toHex (x25519PublicKey bPriv))
+  check "x25519 shared secret (Alice's view)" shared (toHex (x25519 aPriv (hexToBytes bPub)))
+  check "x25519 shared secret (Bob's view)" shared (toHex (x25519 bPriv (hexToBytes aPub)))
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True
