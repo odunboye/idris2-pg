@@ -94,5 +94,31 @@ main = do
                              _ => putStrLn ("FAIL: execMulti returned wrong values: " ++ show multiResults)
        _ => putStrLn ("FAIL: execMulti returned wrong shape: " ++ show multiResults)
 
+  -- withTransaction: a Left inside the action must roll back.
+  Right _ <- execCommand db "CREATE TABLE tx_demo (id INT)" []
+    | Left err => putStrLn ("FAIL create tx_demo: " ++ displayError err)
+  _ <- withTransaction db {a = String} $ do
+         _ <- execCommand db "INSERT INTO tx_demo (id) VALUES (1)" []
+         pure (Left (ProtocolError "deliberate failure to force rollback"))
+  Right afterRollback <- queryRows db "SELECT id FROM tx_demo" []
+    | Left err => putStrLn ("FAIL select after rollback: " ++ displayError err)
+  case afterRollback of
+       [] => putStrLn "OK withTransaction rolled back on Left"
+       _  => putStrLn ("FAIL: withTransaction did not roll back: " ++ show afterRollback)
+
+  -- ...and commit on Right.
+  _ <- withTransaction db (execCommand db "INSERT INTO tx_demo (id) VALUES (2)" [])
+  Right afterCommit <- queryRows db "SELECT id FROM tx_demo" []
+    | Left err => putStrLn ("FAIL select after commit: " ++ displayError err)
+  case map (\r => getInt r "id") afterCommit of
+       [Right 2] => putStrLn "OK withTransaction committed on Right"
+       _         => putStrLn ("FAIL: withTransaction did not commit: " ++ show afterCommit)
+
+  Just Idle <- txStatus db
+    | other => putStrLn ("FAIL: expected Idle tx status after commit, got: " ++ show other)
+  putStrLn "OK txStatus reports Idle after commit"
+
+  _ <- execCommand db "DROP TABLE tx_demo" []
+
   closeDB db
   putStrLn "OK done"

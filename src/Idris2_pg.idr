@@ -1,5 +1,6 @@
 module Idris2_pg
 
+import Data.IORef
 import Data.Maybe
 import Data.PGTypes
 import Data.PGValue
@@ -38,8 +39,19 @@ connectDB cfg = do
                      Left err => pure (Left err)
                      Right sr => case errors sr of
                                       (e :: _) => pure (Left (SqlError e))
-                                      []       => pure (Right (MkDB conx (Just sr)))
+                                      []       => do
+                                        ref <- newIORef (map status (ready sr))
+                                        pure (Right (MkDB conx (Just sr) ref))
 
+-- Records the transaction status from a batch's final ReadyForQuery (the
+-- last result's, since a multi-statement batch shares one at the end) so
+-- txStatus can report it without a round-trip.
+noteStatus : DB -> List QueryResult -> IO ()
+noteStatus db results = case reverse results of
+     []       => pure ()
+     (qr :: _) => case status qr of
+                       Nothing                  => pure ()
+                       Just (MkReadyForQuery s) => writeIORef (txState db) (Just s)
 
 queryDB : DB -> String -> IO (Either PGError (List QueryResult))
 queryDB db str = do
@@ -47,7 +59,12 @@ queryDB db str = do
   resp <- send (MkConnected (socket (conn db))) queryFrame
   case resp of
        (Left x) => pure (Left (ConnectionError x))
-       (Right x) => handleQueryResponses db
+       (Right x) => do
+         res <- handleQueryResponses db
+         case res of
+              Right results => noteStatus db results
+              Left _        => pure ()
+         pure res
 
 -- Runs a query via the extended protocol (Parse/Bind/Describe/Execute/Sync)
 -- with text-encoded parameters, so caller-supplied values never need to be
@@ -65,7 +82,12 @@ execParams db query params = do
   resp <- send (MkConnected (socket (conn db))) frame
   case resp of
        (Left x) => pure (Left (ConnectionError x))
-       (Right x) => handleQueryResponses db
+       (Right x) => do
+         res <- handleQueryResponses db
+         case res of
+              Right results => noteStatus db results
+              Left _        => pure ()
+         pure res
 
 
 -- Runs a query, choosing the simple protocol for zero-arg statements (e.g.
@@ -112,9 +134,39 @@ public export
 execMulti : DB -> String -> IO (Either PGError (List QueryResult))
 execMulti db stmt = queryDB db stmt
 
+||| The transaction status as of the last query run on this connection
+||| (Idle/InTransaction/FailedTransaction), without needing a round-trip.
+||| Nothing only before the first query completes.
+public export
+txStatus : DB -> IO (Maybe TxStatus)
+txStatus db = readIORef (txState db)
+
+public export
+beginTx : DB -> IO (Either PGError String)
+beginTx db = execCommand db "BEGIN" []
+
+public export
+commitTx : DB -> IO (Either PGError String)
+commitTx db = execCommand db "COMMIT" []
+
+public export
+rollbackTx : DB -> IO (Either PGError String)
+rollbackTx db = execCommand db "ROLLBACK" []
+
+||| Runs `action` inside BEGIN/COMMIT, rolling back instead if it returns a
+||| Left. Either way, `action`'s result is returned unchanged.
+public export
+withTransaction : DB -> IO (Either PGError a) -> IO (Either PGError a)
+withTransaction db action = do
+  _ <- beginTx db
+  result <- action
+  case result of
+       Right _ => do _ <- commitTx db; pure result
+       Left _  => do _ <- rollbackTx db; pure result
+
 public export
 closeDB : DB -> IO ()
-closeDB (MkDB (MkPGConnection socket _) _) = do
+closeDB (MkDB (MkPGConnection socket _) _ _) = do
   _ <- send (MkConnected socket) (encode Terminate)
   _ <- close (MkConnected socket)
   pure ()

@@ -2,6 +2,7 @@ module Data.PGTypes
 
 import Derive.Prelude
 import Data.Bits
+import Data.IORef
 import Network.Socket
 import Network.Core
 
@@ -129,6 +130,7 @@ toByte PortalSuspendedTag        = 0x73  -- 's'
 toByte QueryTag                  = 0x51  -- 'Q'
 toByte (UnknownTag b)         = cast b
 
+public export
 data TxStatus
   = Idle
   | InTransaction
@@ -359,6 +361,8 @@ showQueryResult (MkQueryResult description rows commandTag status errors notices
 public export
 record DB where
   constructor MkDB
-  conn   : PGConnection Connected
-  result : Maybe StartupResult
---%runElab derive "DB" [Show]
+  conn    : PGConnection Connected
+  result  : Maybe StartupResult
+  -- Updated after every query with the transaction status from its
+  -- ReadyForQuery, so txStatus can report it without a round-trip.
+  txState : IORef (Maybe TxStatus)
