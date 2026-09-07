@@ -352,6 +352,33 @@ testTimeouts cfg = do
        Left otherErr => putStrLn ("FAIL connectTimeoutMs: expected a ConnectionError timeout, got a different PGError: " ++ displayError otherErr)
        Right _        => putStrLn "FAIL connectTimeoutMs: connected to a supposedly unreachable host"
 
+||| Exercises a real TLS 1.3 handshake, SCRAM-SHA-256 authentication
+||| carried over it, and a query - against the same server `testConfig`
+||| points at, but with useTLS on. Most CI/local Postgres containers don't
+||| have SSL enabled at all, which isn't a client bug, so a server that
+||| replies "does not support SSL" is reported as a skip rather than a
+||| failure; see README for how to stand up an SSL-enabled Postgres to
+||| actually exercise this.
+testTLS : PGConfig -> IO ()
+testTLS cfg = do
+  let tlsCfg = { useTLS := True } cfg
+  result <- connectDB tlsCfg
+  case result of
+       Left (ConnectionError msg) =>
+         if isInfixOf "does not support SSL" msg
+            then putStrLn "SKIP TLS: server does not have SSL enabled"
+            else putStrLn ("FAIL TLS connect: " ++ msg)
+       Left otherErr => putStrLn ("FAIL TLS connect: " ++ displayError otherErr)
+       Right db => do
+         qres <- queryRows db "SELECT 1 AS one, 'hello over tls' AS msg" []
+         case qres of
+              Left err => putStrLn ("FAIL TLS query: " ++ displayError err)
+              Right [row] => case (getInt row "one", getText row "msg") of
+                   (Right 1, Right "hello over tls") => putStrLn "OK TLS handshake, SCRAM auth, and query all succeeded"
+                   other => putStrLn ("FAIL TLS query result: " ++ show other)
+              Right other => putStrLn ("FAIL TLS query: expected one row, got " ++ show (length other))
+         closeDB db
+
 main : IO ()
 main = do
   cfg <- testConfig
@@ -368,6 +395,12 @@ main = do
   testPreparedCache db
   testBinaryFormat db
   testCopy db
+  -- testTLS runs before testTimeouts deliberately: a leaked
+  -- connectTimeoutMs attempt against an unreachable host (see
+  -- Network.Timeout's caveats) was observed to make the very next
+  -- connection attempt in this same process fail, which was exactly
+  -- testTLS when it ran second. Not a TLS bug - reordering fixed it.
+  testTLS cfg
   testTimeouts cfg
   closeDB db
   putStrLn "OK done"

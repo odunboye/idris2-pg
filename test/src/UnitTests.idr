@@ -422,29 +422,32 @@ main = do
   check "TLS 1.3: server application traffic secret" (toHex tls_s_ap_traffic)
     (toHex (deriveSecret tls_masterSecret "s ap traffic" tls_hash_full))
 
-  -- Network.TLSHandshake, against RFC 8448's real ServerHello (parsing a
+  -- Network.TLSHandshake, against a real ServerHello captured from a live
+  -- handshake against an unmodified `postgres:16` server (parsing a
   -- message this client didn't construct itself is the meaningful check;
   -- an encode/decode round-trip of our own output can't catch a decoder
-  -- that's wrong in the same way its matching encoder is).
-  let rfcServerHelloBody = hexToBytes "0303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304"
-  case parseServerHello rfcServerHelloBody of
+  -- that's wrong in the same way its matching encoder is). P-256, not
+  -- x25519 - see Network.TLSHandshake's module comment for why.
+  let liveServerHelloBody = hexToBytes "0303764c646908d0139fc63508036f695d4de2210ab970bcd6cdaaf55511c39be97a00130300004f002b0002030400330045001700410463124783f609001eb9d142e8043a7d511cdf3f334417e3fc2731fe8c3dbab975a2f233c540db152c0ef7824e56b37de4ee1f139fffd5cac1a38f33e7f7011b36"
+  case parseServerHello liveServerHelloBody of
        Nothing => putStrLn "FAIL parseServerHello: returned Nothing on a real ServerHello"
        Just sh => do
-         check "parseServerHello: serverRandom" "a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e26928" (toHex (serverRandom sh))
-         check "parseServerHello: cipherSuite" 0x1301 (cipherSuite sh)
-         check "parseServerHello: serverPublicKey" "c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f" (toHex (serverPublicKey sh))
+         check "parseServerHello: serverRandom" "764c646908d0139fc63508036f695d4de2210ab970bcd6cdaaf55511c39be97a" (toHex (serverRandom sh))
+         check "parseServerHello: cipherSuite" 0x1303 (cipherSuite sh)
+         check "parseServerHello: serverPublicKey" "0463124783f609001eb9d142e8043a7d511cdf3f334417e3fc2731fe8c3dbab975a2f233c540db152c0ef7824e56b37de4ee1f139fffd5cac1a38f33e7f7011b36" (toHex (serverPublicKey sh))
 
-  let rfcFullServerHello = hexToBytes "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304"
-  case decodeHandshakeMessage rfcFullServerHello of
+  let liveFullServerHello = hexToBytes "020000770303764c646908d0139fc63508036f695d4de2210ab970bcd6cdaaf55511c39be97a00130300004f002b0002030400330045001700410463124783f609001eb9d142e8043a7d511cdf3f334417e3fc2731fe8c3dbab975a2f233c540db152c0ef7824e56b37de4ee1f139fffd5cac1a38f33e7f7011b36"
+  case decodeHandshakeMessage liveFullServerHello of
        Nothing => putStrLn "FAIL decodeHandshakeMessage: returned Nothing"
        Just (ty, body, rest) => do
          check "decodeHandshakeMessage: type" htServerHello ty
          check "decodeHandshakeMessage: no trailing bytes" (the (List Bits8) []) rest
-         check "decodeHandshakeMessage: body matches" (toHex rfcServerHelloBody) (toHex body)
+         check "decodeHandshakeMessage: body matches" (toHex liveServerHelloBody) (toHex body)
 
-  -- buildClientHello: self-consistency (own decoder round-trip) using the
-  -- same client random/pubkey RFC 8448 uses, so the inputs are at least
-  -- independently meaningful values rather than arbitrary test data.
+  -- buildClientHello: self-consistency (own decoder round-trip). The
+  -- "public key" here is just arbitrary framing filler - buildClientHello
+  -- doesn't validate its length, so this only exercises the surrounding
+  -- message structure, not a real P-256 key_share.
   let tlsClientRandom = hexToBytes "cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7"
   let tlsClientPub = hexToBytes "99381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c"
   case decodeHandshakeMessage (buildClientHello tlsClientRandom tlsClientPub) of

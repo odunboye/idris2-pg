@@ -127,10 +127,52 @@ dependency), and returns as soon as either finishes. That bounds how long
 the *caller* waits, but not the underlying resource: if the timed-out call
 was a blocking syscall stuck on a truly unresponsive server, timing out
 here does not close the socket or interrupt that syscall — the abandoned
-call keeps running in the background (harmlessly; its result, if any, is
-just never read) until the OS's own TCP retry limit gives up, or the
-process exits. A connection whose read has timed out should be treated as
-unusable and reconnected, not reused.
+call keeps running in the background (its result, if any, is just never
+read) until the OS's own TCP retry limit gives up, or the process exits.
+This isn't always harmless: a timed-out `connectTimeoutMs` attempt against
+an unreachable host was observed to interfere with an unrelated
+connection attempted immediately afterward in the same process (in this
+project's own test suite - see the ordering note in `test/src/Main.idr`),
+likely by holding onto some OS-level resource for as long as it keeps
+retrying. A connection whose read has timed out should be treated as
+unusable and reconnected, not reused, and code with tight latency
+requirements should be wary of firing off many timeout-bounded connection
+attempts in a row.
+
+### TLS
+
+Set `PGConfig.useTLS = True` (via `MkPGConfig` or record update on a
+`mkPGConfig`-built config) to require Postgres's SSLRequest negotiation and
+a TLS 1.3 handshake before the startup message goes out; `connectDB` fails
+outright if the server doesn't support SSL (there's no "prefer" fallback
+to plaintext).
+
+This is a from-scratch TLS 1.3 client (`Network.TLS`), the same philosophy
+as everything else here: X25519 and P-256 ECDHE, ChaCha20-Poly1305, and
+the RFC 8446 key schedule (HKDF-Extract/Expand-Label) are all hand-written
+and verified against IETF/reference-library test vectors — see the
+`Crypto.*`/`Network.TLS*` module comments for exactly which ones. Only
+`TLS_CHACHA20_POLY1305_SHA256` is offered, and P-256 is what actually gets
+negotiated in practice: Postgres's `ssl_ecdh_curve` setting defaults to
+`prime256v1` and, on current Postgres/OpenSSL, can't be pointed at X25519
+at all (a different OpenSSL key-machinery path) - offering only X25519
+gets a `handshake failure` alert from a stock server, confirmed by testing
+even bare `openssl s_client -groups x25519` against one. `Crypto.Curve25519`
+is kept as a complete, independently-tested module even though the
+handshake doesn't use it today.
+
+**The one significant gap: no certificate signature verification.**
+`CertificateVerify` is parsed and folded into the transcript hash (the
+handshake can't complete without it), but its signature is never checked,
+and `Certificate`'s contents are never inspected. That means the
+connection is genuinely encrypted - safe from passive eavesdropping - but
+the server's identity isn't authenticated, so an active
+machine-in-the-middle presenting its own certificate wouldn't be detected.
+Real X.509 parsing plus RSA/ECDSA signature verification is a large
+enough sub-project (ASN.1 DER, a trust store) that it's a documented
+follow-up rather than a blocker here. Everything else - the ECDHE key
+exchange, the key schedule, and the record encryption - is exactly as
+strong as a certificate-verifying client's.
 
 ### Errors
 
@@ -179,8 +221,32 @@ psql -h 127.0.0.1 -U testuser -d testdb -c "SELECT pg_reload_conf();"
 psql -h 127.0.0.1 -U testuser -d testdb -c "ALTER USER testuser WITH PASSWORD 'testpass';"
 ```
 
+The smoke test's `testTLS` step exercises a real TLS 1.3 handshake if (and
+only if) the server it connects to has SSL enabled - against a plain
+`postgres:16` container (SSL off by default), it prints `SKIP TLS: server
+does not have SSL enabled` rather than failing. To actually exercise it,
+enable SSL on the container first (a self-signed cert generated and
+installed at its default `ssl_ecdh_curve=prime256v1` - no special
+configuration needed, since that's what this client negotiates by
+default - see "TLS" above):
+
+```sh
+docker exec idris2-pg-test bash -c '
+  cd "$(psql -U testuser -d testdb -tAc "show data_directory;")"
+  openssl req -new -x509 -days 365 -nodes -out server.crt -keyout server.key -subj "/CN=localhost"
+  chmod 600 server.key
+  chown postgres:postgres server.key server.crt
+'
+psql -h 127.0.0.1 -U testuser -d testdb -c "ALTER SYSTEM SET ssl = on;"
+docker restart idris2-pg-test
+```
+
 CI (`.github/workflows/ci.yml`) runs the unit tests plus both smoke test
-variants (SCRAM and MD5) on every push/PR.
+variants (SCRAM and MD5) on every push/PR; TLS is not yet part of that
+matrix (setting up SSL on a GitHub Actions service container needs
+filesystem access this project hasn't wired into CI yet - see above for
+running it manually) but is fully covered by the unit tests plus manual
+live testing as described here.
 
 ## Features
 
@@ -206,8 +272,9 @@ variants (SCRAM and MD5) on every push/PR.
       server's final signature). The client nonce comes from `contrib`'s
       `System.Random` (Chez's standard PRNG) - fine here since the nonce
       only needs to be unique, not secret, per RFC 5802. No channel binding
-      (`SCRAM-SHA-256-PLUS`) - this client doesn't use TLS, which is what
-      channel binding ties to.
+      (`SCRAM-SHA-256-PLUS`) yet - that would tie into the TLS handshake's
+      exporter data, which is a natural follow-up now that TLS exists but
+      hasn't been built.
 - [x] LISTEN/NOTIFY (`listenChannel`/`unlistenChannel`/`waitForNotification`)
       — use a connection dedicated to listening, since `waitForNotification`
       blocks it until a notification arrives; it can't run other queries
@@ -217,4 +284,11 @@ variants (SCRAM and MD5) on every push/PR.
       cooperative, thread-based (`Network.Timeout`), not OS-level socket
       timeouts; see "Timeouts" above for exactly what that does and
       doesn't bound.
-- [ ] TLS/SSL — the underlying socket layer has no TLS support at all.
+- [x] TLS 1.3 (`PGConfig.useTLS`) — the full handshake and record layer,
+      built entirely from scratch: X25519 *and* P-256 ECDHE
+      (`Crypto.Curve25519`/`Crypto.P256`), ChaCha20-Poly1305
+      (`Crypto.ChaCha20`/`Crypto.Poly1305`/`Crypto.ChaCha20Poly1305`), the
+      HKDF-based key schedule (`Crypto.HKDF`), and the handshake state
+      machine (`Network.TLS`/`Network.TLSHandshake`/`Network.TLSWire`).
+      See "TLS" below for what this does and doesn't protect against, and
+      why P-256 (not X25519) is what's actually negotiated on the wire.

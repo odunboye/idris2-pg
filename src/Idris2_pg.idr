@@ -33,10 +33,10 @@ withReadTimeout db action = case readTimeoutMs (cfg db) of
 public export
 connectDB : PGConfig -> IO (Either PGError DB)
 connectDB cfg = withConnectTimeout cfg $ do
-  conn <- connectPG (host cfg) (port cfg)
+  conn <- connectPG (host cfg) (port cfg) (useTLS cfg)
   case conn of
-       Nothing => pure (Left (ConnectionError "Could not connect"))
-       (Just pgConn) => do
+       Left err => pure (Left (ConnectionError err))
+       (Right pgConn) => do
          let startupMsg = encode (StartupMsg 3 [("user", user cfg), ("database", database cfg)])
          spgConn <- sendStartup pgConn startupMsg
          case spgConn of
@@ -67,7 +67,7 @@ noteStatus db results = case reverse results of
 queryDB : DB -> String -> IO (Either PGError (List QueryResult))
 queryDB db str = withReadTimeout db $ do
   let queryFrame = encode (QueryMsg (MkQuery str))
-  resp <- send (MkConnected (socket (conn db))) queryFrame
+  resp <- pgSend (conn db) queryFrame
   case resp of
        (Left x) => pure (Left (ConnectionError x))
        (Right x) => do
@@ -115,7 +115,7 @@ execParams db query params wantBinary = do
                     ++ encode (Describe 'P' "")
                     ++ encode (Execute "" 0)
                     ++ encode Sync
-      resp <- send (MkConnected (socket (conn db))) frame
+      resp <- pgSend (conn db) frame
       case resp of
            Left x => do
              dropCached
@@ -268,11 +268,11 @@ public export
 cancelQuery : DB -> IO (Either PGError ())
 cancelQuery db = case map backendKey (result db) of
   Just (Just bk) => withConnectTimeout (cfg db) $ do
-    conn <- connectPG (host (cfg db)) (port (cfg db))
+    conn <- connectPG (host (cfg db)) (port (cfg db)) (useTLS (cfg db))
     case conn of
-         Nothing => pure (Left (ConnectionError "could not open cancel connection"))
-         Just cancelConn => do
-           sendRes <- send (MkConnected (socket cancelConn)) (encode (CancelRequest (pid bk) (secret bk)))
+         Left err => pure (Left (ConnectionError err))
+         Right cancelConn => do
+           sendRes <- pgSend cancelConn (encode (CancelRequest (pid bk) (secret bk)))
            _ <- close (MkConnected (socket cancelConn))
            case sendRes of
                 Left err => pure (Left (ConnectionError err))
@@ -285,7 +285,7 @@ cancelQuery db = case map backendKey (result db) of
 public export
 copyOut : DB -> String -> IO (Either PGError String)
 copyOut db sql = withReadTimeout db $ do
-  resp <- send (MkConnected (socket (conn db))) (encode (QueryMsg (MkQuery sql)))
+  resp <- pgSend (conn db) (encode (QueryMsg (MkQuery sql)))
   case resp of
        Left err => pure (Left (ConnectionError err))
        Right () => collect [] []
@@ -310,7 +310,7 @@ copyOut db sql = withReadTimeout db $ do
 public export
 copyIn : DB -> String -> String -> IO (Either PGError String)
 copyIn db sql payload = withReadTimeout db $ do
-  resp <- send (MkConnected (socket (conn db))) (encode (QueryMsg (MkQuery sql)))
+  resp <- pgSend (conn db) (encode (QueryMsg (MkQuery sql)))
   case resp of
        Left err => pure (Left (ConnectionError err))
        Right () => waitForCopyIn
@@ -334,7 +334,7 @@ copyIn db sql payload = withReadTimeout db $ do
       case frame of
            Left err => pure (Left (ConnectionError err))
            Right (CopyInResponseMsg _ _) => do
-             sendRes <- send (MkConnected (socket (conn db)))
+             sendRes <- pgSend (conn db)
                           (encode (CopyData (stringToBytes payload)) ++ encode CopyDone)
              case sendRes of
                   Left err => pure (Left (ConnectionError err))
@@ -345,7 +345,7 @@ copyIn db sql payload = withReadTimeout db $ do
 
 public export
 closeDB : DB -> IO ()
-closeDB (MkDB (MkPGConnection socket _) _ _ _ _ _) = do
-  _ <- send (MkConnected socket) (encode Terminate)
-  _ <- close (MkConnected socket)
+closeDB (MkDB pgConn _ _ _ _ _) = do
+  _ <- pgSend pgConn (encode Terminate)
+  _ <- close (MkConnected (socket pgConn))
   pure ()

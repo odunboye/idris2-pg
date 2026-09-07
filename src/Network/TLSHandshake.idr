@@ -5,9 +5,19 @@ module Network.TLSHandshake
 -- of EncryptedExtensions/Certificate/CertificateVerify to skip over them
 -- (no certificate verification in this first landing - see README/
 -- Network.TLS's module comment for that scope decision), plus Finished.
+--
+-- Key exchange group: secp256r1 (P-256), not x25519. Postgres's
+-- ssl_ecdh_curve GUC defaults to "prime256v1" and - discovered empirically
+-- while building this - can't be pointed at x25519 at all on current
+-- Postgres/OpenSSL (it only accepts a classic named EC_KEY curve; x25519
+-- is a different OpenSSL key type). Offering only x25519 gets a
+-- "handshake failure" alert from a stock `postgres:16` container, and
+-- even bare `openssl s_client -groups x25519` gets the same failure
+-- against it - confirmed to be the server's default configuration, not a
+-- bug in this client, before switching the offered group.
 
 import Network.TLSWire
-import Crypto.Curve25519
+import Crypto.P256
 import Crypto.HKDF
 import Crypto.SCRAM
 import System.Random
@@ -30,7 +40,7 @@ extSupportedVersionsBody : Bytes
 extSupportedVersionsBody = [u8 2] ++ u16 0x0304  -- just TLS 1.3
 
 extSupportedGroupsBody : Bytes
-extSupportedGroupsBody = u16 2 ++ u16 groupX25519
+extSupportedGroupsBody = u16 2 ++ u16 groupSecp256r1
 
 -- A minimal, standard set - ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256,
 -- rsa_pkcs1_sha256, ed25519 - enough for any common server certificate.
@@ -43,12 +53,13 @@ extSignatureAlgorithmsBody =
 
 extKeyShareBody : (clientPublicKey : Bytes) -> Bytes
 extKeyShareBody pubKey =
-  let entry = u16 groupX25519 ++ encodeVec16 pubKey
+  let entry = u16 groupSecp256r1 ++ encodeVec16 pubKey
   in encodeVec16 entry
 
 ||| Builds a ClientHello handshake message (including the 1-byte type +
 ||| 3-byte length header) offering only TLS_CHACHA20_POLY1305_SHA256 and
-||| an X25519 key share.
+||| a P-256 key share (`clientPublicKey`: the 65-byte SEC1 uncompressed
+||| point from Crypto.P256.p256PublicKey).
 export
 buildClientHello : (clientRandom : Bytes) -> (clientPublicKey : Bytes) -> Bytes
 buildClientHello clientRandom clientPublicKey =
@@ -78,7 +89,7 @@ record ParsedServerHello where
 
 ||| Parses a ServerHello message BODY (not including the handshake header -
 ||| the caller strips that via decodeHandshakeMessage first). Fails if the
-||| server didn't offer an x25519 key_share, or the message is malformed.
+||| server didn't offer a P-256 key_share, or the message is malformed.
 export
 parseServerHello : Bytes -> Maybe ParsedServerHello
 parseServerHello body = do
@@ -92,7 +103,7 @@ parseServerHello body = do
   keyShareBody            <- findExtension extKeyShare exts
   (group, ks1)            <- decodeU16 keyShareBody
   (serverPublicKey, ks2)  <- decodeVec16 ks1
-  if group == groupX25519 && length serverPublicKey == 32 && length serverRandom == 32
+  if group == groupSecp256r1 && length serverPublicKey == 65 && length serverRandom == 32
      then Just (MkParsedServerHello serverRandom cipherSuite serverPublicKey)
      else Nothing
 

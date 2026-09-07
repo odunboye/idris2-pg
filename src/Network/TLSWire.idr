@@ -124,7 +124,16 @@ extSignatureAlgorithms = 13
 extKeyShare            = 51
 extSupportedVersions   = 43
 
--- The one named group this client offers/accepts: x25519.
+-- Named groups. secp256r1 is the one this client actually offers - see
+-- Network.TLSHandshake's module comment for why (Postgres's ssl_ecdh_curve
+-- defaults to prime256v1, and can't be pointed at x25519 at all in
+-- current Postgres/OpenSSL). x25519 stays defined since Crypto.Curve25519
+-- is still a complete, verified, usable module, even though the
+-- handshake doesn't offer it today.
 public export
 groupX25519 : Nat
 groupX25519 = 0x001d
+
+public export
+groupSecp256r1 : Nat
+groupSecp256r1 = 0x0017

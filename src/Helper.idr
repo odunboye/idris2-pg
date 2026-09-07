@@ -2,11 +2,13 @@ module Helper
 
 import Network.Socket
 import Data.Bits
+import Data.IORef
 import Data.List
 import Data.Maybe
 import Data.PGTypes
 import Network.Core
 import Network.RawSocket
+import Network.TLS
 import Crypto.MD5
 import Crypto.SCRAM
 import Derive.Prelude
@@ -187,15 +189,34 @@ decodeInt16List (S k) bs = do
   Right (v :: more)
 
 
+-- Every send/receive on an established connection goes through these two,
+-- rather than the raw socket directly: once TLS has been negotiated (see
+-- connectPG), conn.tls holds a Just, and every byte gets AEAD-sealed/
+-- opened by Network.TLS instead of touching the socket directly.
+public export
+pgSend : PGConnection Connected -> Bytes -> IO (Either String ())
+pgSend conn bytes = do
+  mSession <- readIORef (tls conn)
+  case mSession of
+       Nothing      => send (MkConnected (socket conn)) bytes
+       Just session => tlsSend session bytes
+
+public export
+pgReceiveExact : PGConnection Connected -> Int -> IO (Either String Bytes)
+pgReceiveExact conn n = do
+  mSession <- readIORef (tls conn)
+  case mSession of
+       Nothing      => receiveExact (MkConnected (socket conn)) n
+       Just session => tlsReceiveExact session n
+
 public export
 readFrameBit : (PGConnection Connected) -> IO (Either String FrameBytes)
 readFrameBit conn = do
-  let connx = (MkConnected (socket conn))
-  msgTypeResp <- receiveExact connx 1
+  msgTypeResp <- pgReceiveExact conn 1
   case msgTypeResp of
        (Left x) => pure (Left x)
        (Right tagByte) => do
-          lenRes <- receiveExact connx 4
+          lenRes <- pgReceiveExact conn 4
           case lenRes of
               (Left x) => pure (Left x)
               (Right lenList) => do
@@ -203,18 +224,25 @@ readFrameBit conn = do
                     case vect of
                          Nothing => pure (Left "Error parsing length")
                          (Just lenVect) => do
-                           payloadRes <- receiveExact connx ((toInt lenVect) - 4)
+                           payloadRes <- pgReceiveExact conn ((toInt lenVect) - 4)
                            case payloadRes of
                                 (Left y) => pure (Left y)
                                 (Right y) => pure (Right(MkFrameBytes tagByte lenList y))
 
 
+-- Postgres's SSLRequest: an untagged 8-byte message (length + the special
+-- SSLRequest code, same "no tag byte" shape as CancelRequest), answered
+-- with a single 'S' (proceed with a TLS handshake on this same socket) or
+-- 'N' (the server doesn't support SSL).
+sslRequestBytes : Bytes
+sslRequestBytes = encodeInt32 8 ++ encodeInt32 80877103
+
 public export
-connectPG : String -> Int -> IO (Maybe (PGConnection Connected))
-connectPG host port = do
+connectPG : String -> Int -> (wantTLS : Bool) -> IO (Either String (PGConnection Connected))
+connectPG host port wantTLS = do
   sockRes <- getSock
   case sockRes of
-    Left _ => pure Nothing
+    Left _ => pure (Left "could not create socket")
     Right socket => do
       -- Hostname is resolved via getaddrinfo at the C layer, which handles
       -- both real hostnames and dotted-quad/numeric addresses.
@@ -222,18 +250,51 @@ connectPG host port = do
       case connRes of
         Nothing => do
           Network.Socket.close socket
-          pure Nothing
-        Just _  => pure (Just (MkPGConnection socket []))
+          pure (Left "could not connect")
+        Just _  =>
+          if not wantTLS
+             then do
+               tlsRef <- newIORef Nothing
+               pure (Right (MkPGConnection socket [] tlsRef))
+             else negotiateTLS socket
+  where
+    negotiateTLS : Socket -> IO (Either String (PGConnection Connected))
+    negotiateTLS socket = do
+      sendRes <- send (MkConnected socket) sslRequestBytes
+      case sendRes of
+           Left err => do
+             Network.Socket.close socket
+             pure (Left ("could not send SSLRequest: " ++ err))
+           Right () => do
+             respRes <- receiveExact (MkConnected socket) 1
+             case respRes of
+                  Left err => do
+                    Network.Socket.close socket
+                    pure (Left ("could not read SSLRequest response: " ++ err))
+                  Right [0x53] => do -- 'S': server will speak TLS from here
+                    tlsRes <- tlsClientHandshake socket
+                    case tlsRes of
+                         Left err => do
+                           Network.Socket.close socket
+                           pure (Left ("TLS handshake failed: " ++ err))
+                         Right session => do
+                           tlsRef <- newIORef (Just session)
+                           pure (Right (MkPGConnection socket [] tlsRef))
+                  Right [0x4e] => do -- 'N': no SSL support, and useTLS means this is fatal
+                    Network.Socket.close socket
+                    pure (Left "server does not support SSL")
+                  Right _ => do
+                    Network.Socket.close socket
+                    pure (Left "unexpected response to SSLRequest")
 
 
 public export
 sendStartup : PGConnection Connected -> List Bits8 -> IO (Maybe (PGConnection StartupSent))
 sendStartup conn msg = do
-  let conx = MkConnected (socket conn)
-  res <- send conx msg
+  res <- pgSend conn msg
   case res of
        (Left x) => pure Nothing
-       (Right x) => pure (Just(MkPGConnection (socket conn) []))
+       (Right x) => pure (Just (MkPGConnection (socket conn) [] (tls conn)))
 
 -- Keeps raw bytes rather than decoding to String here: a column can be in
 -- binary format, whose bytes generally aren't valid UTF-8 text. See
@@ -484,14 +545,14 @@ handleStartupResponse user password conn = go ScramNotStarted init
 
     sendPassword : String -> IO (Either PGError ())
     sendPassword pw = do
-      res <- send (MkConnected (socket conn)) (encode (PasswordMessage pw))
+      res <- pgSend conn (encode (PasswordMessage pw))
       case res of
            Left err => pure (Left (ConnectionError err))
            Right () => pure (Right ())
 
     sendFrame : Bytes -> IO (Either PGError ())
     sendFrame bytes = do
-      res <- send (MkConnected (socket conn)) bytes
+      res <- pgSend conn bytes
       case res of
            Left err => pure (Left (ConnectionError err))
            Right () => pure (Right ())

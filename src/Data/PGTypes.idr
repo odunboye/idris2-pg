@@ -5,6 +5,7 @@ import Data.Bits
 import Data.IORef
 import Network.Socket
 import Network.Core
+import Network.TLS
 
 %language ElabReflection
 %default total
@@ -21,11 +22,15 @@ record PGConnection (state : PGState) where
   constructor MkPGConnection
   socket : Socket
   params : List (String, String)  -- e.g. user, database
+  -- Set once (by the SSLRequest negotiation in Helper.connectPG) if this
+  -- connection upgraded to TLS; Nothing means every send/receive goes
+  -- straight to the raw socket, unchanged from before TLS support existed.
+  tls    : IORef (Maybe TLSSession)
 --%runElab derive "PGConnection" [Show, Eq]
 
 public export
 mkConnectedPG : (PGConnection StartupSent) -> (PGConnection Connected)
-mkConnectedPG (MkPGConnection socket params) = MkPGConnection socket params
+mkConnectedPG (MkPGConnection socket params tls) = MkPGConnection socket params tls
 
 public export
 Bytes : Type
@@ -400,14 +405,20 @@ record PGConfig where
   -- copyIn. Nothing (the default via mkPGConfig) preserves the old
   -- behavior: block indefinitely.
   readTimeoutMs    : Maybe Nat
+  -- If True, connectDB requires the connection to upgrade to TLS (Postgres's
+  -- SSLRequest negotiation) and fails outright if the server doesn't
+  -- support it - there's no "prefer" mode that falls back to plaintext.
+  -- See Network.TLS's module comment for exactly what this does and
+  -- doesn't protect against (no certificate verification yet).
+  useTLS           : Bool
 
-||| Convenience constructor for the common case: no timeouts, i.e. the same
-||| block-indefinitely behavior this client always had. Use the MkPGConfig
-||| constructor (or record update syntax on a PGConfig it built) directly to
-||| set connectTimeoutMs/readTimeoutMs.
+||| Convenience constructor for the common case: no timeouts, no TLS - the
+||| same behavior this client always had. Use the MkPGConfig constructor
+||| (or record update syntax on a PGConfig it built) directly to set
+||| connectTimeoutMs/readTimeoutMs/useTLS.
 public export
 mkPGConfig : (host : String) -> (port : Int) -> (user : String) -> (password : String) -> (database : String) -> PGConfig
-mkPGConfig host port user password database = MkPGConfig host port user password database Nothing Nothing
+mkPGConfig host port user password database = MkPGConfig host port user password database Nothing Nothing False
 
 public export
 record DB where

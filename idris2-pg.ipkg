@@ -23,12 +23,14 @@ modules = Network.Core
         , Network.Timeout
         , Network.TLSWire
         , Network.TLSHandshake
+        , Network.TLS
         , Data.PGTypes
         , Data.PGJson
         , Crypto.MD5
         , Crypto.SHA256
         , Crypto.SCRAM
         , Crypto.Curve25519
+        , Crypto.P256
         , Crypto.ChaCha20
         , Crypto.Poly1305
         , Crypto.ChaCha20Poly1305
