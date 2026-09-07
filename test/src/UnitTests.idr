@@ -1,6 +1,7 @@
 module UnitTests
 
 import Data.List
+import Data.Bits
 import Data.PGTypes
 import Helper
 import Crypto.MD5
@@ -8,6 +9,7 @@ import Crypto.SCRAM
 import Crypto.Curve25519
 import Crypto.ChaCha20
 import Crypto.Poly1305
+import Crypto.ChaCha20Poly1305
 import Data.PGValue
 import Network.Timeout
 import System
@@ -317,6 +319,25 @@ main = do
 
   let pKey3 = hexToBytes "d86877c4b05d71ca0631f4a50b39f0161d8dc779c1aff63d15ef1e14bb467eb7"
   check "poly1305 tag on an empty message" "1d8dc779c1aff63d15ef1e14bb467eb7" (toHex (poly1305 pKey3 []))
+
+  -- Crypto.ChaCha20Poly1305, against Python cryptography-generated
+  -- reference ciphertext+tag, plus a decrypt round-trip and a
+  -- tamper-detection check that isn't derivable from Python alone.
+  let aeadKey1 = hexToBytes "c320ed24b7032d60c31606f4cab0d2fea47ab083067f37af95cc5c84f0ba4e56"
+  let aeadNonce1 = hexToBytes "7658fd7f015d070d79051c22"
+  let aeadAad1 = hexToBytes "6164646974696f6e616c206461746120313233"
+  let aeadPt1 = hexToBytes "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e"
+  let (aeadCt1, aeadTag1) = encrypt aeadKey1 aeadNonce1 aeadAad1 aeadPt1
+  check "chacha20poly1305 ciphertext"
+    "c8f7ce349c664f3d59018c724ebbea74183c3755d2bc4c400c7123b893171ef7ea09073f7f5a17c8c6c83d2afa5112dd7526039106c42941b1cedf5d17f2f592d7482248266a5ad277211d9ca9b7ad9a0963e54dffea1098178cfe5970c646f88c0b66cc04143c2f75d4e3f6e4e2bdda3217"
+    (toHex aeadCt1)
+  check "chacha20poly1305 tag" "ff2a6d9593f8470a355c9df8d16fcd5c" (toHex aeadTag1)
+  check "chacha20poly1305 decrypt round-trip" (Just aeadPt1) (decrypt aeadKey1 aeadNonce1 aeadAad1 aeadCt1 aeadTag1)
+  case aeadCt1 of
+       (b0 :: rest) =>
+         check "chacha20poly1305 rejects a tampered ciphertext" Nothing
+           (decrypt aeadKey1 aeadNonce1 aeadAad1 ((b0 `xor` 1) :: rest) aeadTag1)
+       [] => putStrLn "FAIL chacha20poly1305 tamper check: ciphertext was unexpectedly empty"
   where
     isLeft : Either a b -> Bool
     isLeft (Left _) = True

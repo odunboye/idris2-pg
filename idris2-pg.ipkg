@@ -29,6 +29,7 @@ modules = Network.Core
         , Crypto.Curve25519
         , Crypto.ChaCha20
         , Crypto.Poly1305
+        , Crypto.ChaCha20Poly1305
         , Helper
         , Data.PGBinary
         , Data.PGValue
