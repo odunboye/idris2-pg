@@ -130,35 +130,30 @@ pack build test.ipkg
 
 CI (`.github/workflows/ci.yml`) runs both on every push/PR.
 
-## Supported
+## Features
 
-- Startup + MD5/cleartext/trust password authentication
-- Simple and extended (parameterized) query protocols
-- CREATE/SELECT/INSERT/UPDATE/DELETE/DROP, multi-statement batches
-  (`execMulti`), transactions (`beginTx`/`commitTx`/`rollbackTx`/
-  `withTransaction`, `txStatus`)
-- Query cancellation (`cancelQuery`)
-- NOTIFY payload decoding (see below)
-- Text/int/bool/double/arbitrary-precision-integer/date/timestamp/
-  one-dimensional-array value decoding
-
-## Not supported
-
-- **SCRAM-SHA-256 auth** — Postgres 14+'s default for new roles. Only
-  trust/md5/cleartext are implemented; a role authenticating against this
-  client needs `password_encryption = md5` (see above) or `trust`.
-- **TLS/SSL** — the underlying socket layer has no TLS support at all.
-- **The `COPY` protocol** — no bulk import/export.
-- **Binary format** — everything is text format, both for parameters sent
-  and results received.
-- **Read/connect timeouts** — a hung or unresponsive server can block a call
-  indefinitely; there's no way to bound that today.
-- **LISTEN/NOTIFY consumption** — `NotificationResponse` decodes correctly
-  (see `Data.PGTypes.Notification`), but nothing exposes a way to `LISTEN`
-  and then wait for/consume notifications without blocking on an unrelated
-  query's response; that needs the read-timeout work above to do well.
-- **Prepared statement caching** — every parameterized call uses a fresh
-  unnamed statement/portal; nothing is cached or reused across calls.
-- **Multi-dimensional arrays, JSON/JSONB typed decoding** — arrays are
-  one-dimensional scalars only; JSON/JSONB come back as raw text (see
-  Value decoding above).
+- [x] Startup + MD5/cleartext/trust password authentication
+- [x] Simple and extended (parameterized) query protocols
+- [x] CREATE/SELECT/INSERT/UPDATE/DELETE/DROP, multi-statement batches (`execMulti`)
+- [x] Transactions (`beginTx`/`commitTx`/`rollbackTx`/`withTransaction`, `txStatus`)
+- [x] Query cancellation (`cancelQuery`)
+- [x] NOTIFY payload decoding (see `Data.PGTypes.Notification`)
+- [x] Value decoding: text/int/bool/double/arbitrary-precision integer/date/timestamp/one-dimensional array (see "Value decoding" above)
+- [ ] SCRAM-SHA-256 auth — Postgres 14+'s default for new roles. Only
+      trust/md5/cleartext are implemented; a role authenticating against this
+      client needs `password_encryption = md5` (see above) or `trust`.
+- [ ] TLS/SSL — the underlying socket layer has no TLS support at all.
+- [ ] The `COPY` protocol — no bulk import/export.
+- [ ] Binary format — everything is text format, both for parameters sent
+      and results received.
+- [ ] Read/connect timeouts — a hung or unresponsive server can block a call
+      indefinitely; there's no way to bound that today.
+- [ ] LISTEN/NOTIFY consumption — decoding works, but nothing exposes a way
+      to `LISTEN` and then wait for/consume notifications without blocking
+      on an unrelated query's response; that needs the read-timeout work
+      above to do well.
+- [ ] Prepared statement caching — every parameterized call uses a fresh
+      unnamed statement/portal; nothing is cached or reused across calls.
+- [ ] Multi-dimensional arrays, JSON/JSONB typed decoding — arrays are
+      one-dimensional scalars only; JSON/JSONB come back as raw text (see
+      "Value decoding" above).
