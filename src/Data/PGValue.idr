@@ -249,20 +249,29 @@ toElement wasQuoted cs =
   let str = pack cs
   in if not wasQuoted && str == "NULL" then Nothing else Just str
 
-parseValue : List Char -> Either String (PGArrayValue, List Char)
-parseGroup : List Char -> List PGArrayValue -> Either String (PGArrayValue, List Char)
+-- A budget on remaining "{...}" nesting, decremented only when a new group
+-- opens - without it, a deeply nested server-supplied array text could
+-- exhaust the call stack (parseValue/parseGroup recurse into each other
+-- once per nesting level).
+maxArrayDepth : Nat
+maxArrayDepth = 100
+
+parseValue : (depth : Nat) -> List Char -> Either String (PGArrayValue, List Char)
+parseGroup : (depth : Nat) -> List Char -> List PGArrayValue -> Either String (PGArrayValue, List Char)
 parseScalar : List Char -> Either String (PGArrayValue, List Char)
 parseQuoted : List Char -> List Char -> Either String (PGArrayValue, List Char)
 spanScalar : List Char -> (List Char, List Char)
 
-parseValue ('{' :: rest) = parseGroup rest []
-parseValue cs            = parseScalar cs
+parseValue depth ('{' :: rest) = case depth of
+     Z        => Left "array nesting too deep"
+     S depth' => parseGroup depth' rest []
+parseValue depth cs            = parseScalar cs
 
-parseGroup ('}' :: rest) acc = Right (PGGroup (reverse acc), rest)
-parseGroup cs            acc = do
-  (v, rest) <- parseValue cs
+parseGroup depth ('}' :: rest) acc = Right (PGGroup (reverse acc), rest)
+parseGroup depth cs            acc = do
+  (v, rest) <- parseValue depth cs
   case rest of
-       (',' :: rest') => parseGroup rest' (v :: acc)
+       (',' :: rest') => parseGroup depth rest' (v :: acc)
        ('}' :: rest') => Right (PGGroup (reverse (v :: acc)), rest')
        _              => Left "expected ',' or '}' in array"
 
@@ -285,7 +294,7 @@ spanScalar (c :: cs) =
 public export
 parsePGArrayValue : String -> Either String PGArrayValue
 parsePGArrayValue s = case unpack s of
-     ('{' :: rest) => case parseGroup rest [] of
+     ('{' :: rest) => case parseGroup maxArrayDepth rest [] of
           Right (v, []) => Right v
           Right (_, _)  => Left "trailing content after array value"
           Left err      => Left err

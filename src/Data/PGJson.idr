@@ -87,16 +87,27 @@ parseNumber cs = case span isNumChar cs of
           Just d  => Right (JNumber d, rest)
           Nothing => Left ("invalid JSON number: " ++ pack numChars)
 
-parseVal : List Char -> Either String (JSONValue, List Char)
-parseArrayBody : List Char -> List JSONValue -> Either String (JSONValue, List Char)
-parseObjectBody : List Char -> List (String, JSONValue) -> Either String (JSONValue, List Char)
+-- A budget on remaining container nesting, decremented only at points that
+-- open a new '{'/'[' - without it, deeply nested server-supplied JSON text
+-- could exhaust the call stack (these three functions recurse into each
+-- other once per nesting level).
+maxJSONDepth : Nat
+maxJSONDepth = 100
 
-parseVal cs = case skipWs cs of
+parseVal : (depth : Nat) -> List Char -> Either String (JSONValue, List Char)
+parseArrayBody : (depth : Nat) -> List Char -> List JSONValue -> Either String (JSONValue, List Char)
+parseObjectBody : (depth : Nat) -> List Char -> List (String, JSONValue) -> Either String (JSONValue, List Char)
+
+parseVal depth cs = case skipWs cs of
      ('"' :: rest) => do
        (s, rest') <- parseString rest
        Right (JString s, rest')
-     ('{' :: rest) => parseObjectBody (skipWs rest) []
-     ('[' :: rest) => parseArrayBody (skipWs rest) []
+     ('{' :: rest) => case depth of
+          Z      => Left "JSON nesting too deep"
+          S depth' => parseObjectBody depth' (skipWs rest) []
+     ('[' :: rest) => case depth of
+          Z      => Left "JSON nesting too deep"
+          S depth' => parseArrayBody depth' (skipWs rest) []
      cs' => case stripLit "true" cs' of
           Just rest => Right (JBool True, rest)
           Nothing   => case stripLit "false" cs' of
@@ -105,24 +116,24 @@ parseVal cs = case skipWs cs of
                     Just rest => Right (JNull, rest)
                     Nothing   => parseNumber cs'
 
-parseArrayBody cs acc = case skipWs cs of
+parseArrayBody depth cs acc = case skipWs cs of
      (']' :: rest) => Right (JArray (reverse acc), rest)
      cs' => do
-       (v, rest) <- parseVal cs'
+       (v, rest) <- parseVal depth cs'
        case skipWs rest of
-            (',' :: rest') => parseArrayBody (skipWs rest') (v :: acc)
+            (',' :: rest') => parseArrayBody depth (skipWs rest') (v :: acc)
             (']' :: rest') => Right (JArray (reverse (v :: acc)), rest')
             _              => Left "expected ',' or ']' in JSON array"
 
-parseObjectBody cs acc = case skipWs cs of
+parseObjectBody depth cs acc = case skipWs cs of
      ('}' :: rest) => Right (JObject (reverse acc), rest)
      ('"' :: rest) => do
        (key, afterKey) <- parseString rest
        case skipWs afterKey of
             (':' :: afterColon) => do
-              (v, afterVal) <- parseVal (skipWs afterColon)
+              (v, afterVal) <- parseVal depth (skipWs afterColon)
               case skipWs afterVal of
-                   (',' :: rest') => parseObjectBody (skipWs rest') ((key, v) :: acc)
+                   (',' :: rest') => parseObjectBody depth (skipWs rest') ((key, v) :: acc)
                    ('}' :: rest') => Right (JObject (reverse ((key, v) :: acc)), rest')
                    _              => Left "expected ',' or '}' in JSON object"
             _ => Left "expected ':' after JSON object key"
@@ -131,7 +142,7 @@ parseObjectBody cs acc = case skipWs cs of
 public export
 parseJSON : String -> Either String JSONValue
 parseJSON s = do
-  (v, rest) <- parseVal (unpack s)
+  (v, rest) <- parseVal maxJSONDepth (unpack s)
   case skipWs rest of
        [] => Right v
        _  => Left "trailing content after JSON value"

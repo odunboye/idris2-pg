@@ -12,6 +12,7 @@ module Crypto.SCRAM
 -- itself and the server-contributed nonce extension.
 
 import Crypto.SHA256
+import Crypto.ChaCha20Poly1305
 import Data.Bits
 import Data.List
 import Data.List1
@@ -205,5 +206,7 @@ public export
 verifyServerFinal : String -> List Bits8 -> Bool
 verifyServerFinal serverFinalRaw expectedSignature =
   case unpack serverFinalRaw of
-       ('v' :: '=' :: rest) => base64Decode (pack rest) == Just expectedSignature
+       ('v' :: '=' :: rest) => case base64Decode (pack rest) of
+                                     Just sig => constantTimeEq sig expectedSignature
+                                     Nothing  => False
        _                    => False

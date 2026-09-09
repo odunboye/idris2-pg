@@ -231,7 +231,7 @@ tlsClientHandshake sock = do
                                         transcriptBeforeFinished = transcriptCHSH ++ eeBytes ++ certBytes ++ cvBytes
                                         hashBeforeFinished       = sha256 transcriptBeforeFinished
                                         expectedServerFinished   = computeFinished serverHSTraffic hashBeforeFinished
-                                    if expectedServerFinished /= finBody
+                                    if not (constantTimeEq expectedServerFinished finBody)
                                        then pure (Left "TLS: server Finished verification failed")
                                        else do
                                          let finishedBytes         = handshakeMessage htFinished finBody

@@ -60,14 +60,17 @@ public export
 receiveExact : RawConn Connected -> Int -> IO (Either String (List Bits8))
 receiveExact conn len = go len []
   where
-    go : Int -> List Bits8 -> IO (Either String (List Bits8))
-    go remaining acc =
+    -- Chunks are prepended (O(1)) as they arrive and concatenated once at
+    -- the end, rather than `acc ++ bytes` every iteration - that would be
+    -- O(n) per chunk, so O(n^2) total for a large payload.
+    go : Int -> List (List Bits8) -> IO (Either String (List Bits8))
+    go remaining chunks =
       if remaining <= 0
-         then pure (Right acc)
+         then pure (Right (concat (reverse chunks)))
          else do
            res <- receive conn remaining
            case res of
                 (Left err) => pure (Left err)
                 (Right []) => pure (Left "receiveExact: connection closed before all bytes received")
-                (Right bytes) => go (remaining - cast (length bytes)) (acc ++ bytes)
+                (Right bytes) => go (remaining - cast (length bytes)) (bytes :: chunks)
 

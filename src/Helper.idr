@@ -35,10 +35,33 @@ bytesToString bs = pack (map (chr . cast) bs)
 
 public export
 toInt : Vect 4 Bits8 ->  Int
-toInt [x, y, z, w] = ((cast x) `shiftL` 24)  
+toInt [x, y, z, w] = ((cast x) `shiftL` 24)
   .|. ((cast y) `shiftL` 16)
   .|. ((cast z) `shiftL` 8)
   .|. cast w
+
+-- A defensive cap, not something the wire protocol itself mandates: without
+-- it a malicious/compromised server could declare an arbitrarily large
+-- message length and force this client to buffer that many bytes.
+public export
+maxFrameBodySize : Int
+maxFrameBodySize = 1073741824  -- 1 GiB
+
+||| Validates a message's declared length (the 4-byte length field, which
+||| includes itself) before it drives a read, returning the payload size to
+||| actually read. Rejects a length smaller than the 4-byte prefix itself
+||| (which would otherwise go negative and desync the frame boundary) and a
+||| payload larger than `maxFrameBodySize`.
+public export
+validateFrameLength : Int -> Either String Int
+validateFrameLength msgLen =
+  if msgLen < 4
+     then Left "Protocol error: message length field is smaller than the 4-byte length prefix itself"
+     else let payloadLen = msgLen - 4
+          in if payloadLen > maxFrameBodySize
+                then Left ("Protocol error: server-declared message length " ++ show msgLen
+                            ++ " exceeds the " ++ show maxFrameBodySize ++ "-byte limit")
+                else Right payloadLen
 
 -- Encode/decode 16-bit and 32-bit integers (big endian)
 public export
@@ -223,11 +246,13 @@ readFrameBit conn = do
                     let vect = toVect 4 lenList
                     case vect of
                          Nothing => pure (Left "Error parsing length")
-                         (Just lenVect) => do
-                           payloadRes <- pgReceiveExact conn ((toInt lenVect) - 4)
-                           case payloadRes of
-                                (Left y) => pure (Left y)
-                                (Right y) => pure (Right(MkFrameBytes tagByte lenList y))
+                         (Just lenVect) => case validateFrameLength (toInt lenVect) of
+                              Left err => pure (Left err)
+                              Right payloadLen => do
+                                payloadRes <- pgReceiveExact conn payloadLen
+                                case payloadRes of
+                                     (Left y) => pure (Left y)
+                                     (Right y) => pure (Right(MkFrameBytes tagByte lenList y))
 
 
 -- Postgres's SSLRequest: an untagged 8-byte message (length + the special

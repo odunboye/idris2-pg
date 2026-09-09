@@ -36,7 +36,9 @@ macData aad ciphertext =
 -- on the two lists - some nod to avoiding a timing oracle on tag
 -- verification, though see the caveats already documented in
 -- Crypto.Curve25519 about what this runtime can and can't actually
--- guarantee.
+-- guarantee. Exported since Network.TLS's Finished check and
+-- Crypto.SCRAM's server-signature check need the same property.
+export
 constantTimeEq : List Bits8 -> List Bits8 -> Bool
 constantTimeEq xs ys =
   length xs == length ys && foldl xor 0 (zipWith xor xs ys) == 0

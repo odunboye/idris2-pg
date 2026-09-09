@@ -37,6 +37,14 @@ hexToBytes s = go (unpack s)
     go (a :: b :: rest) = cast (hexVal a * 16 + hexVal b) :: go rest
     go _                = []
 
+-- n levels of nested arrays, e.g. nestedJSONArray 3 = "[[[1]]]".
+nestedJSONArray : Nat -> String
+nestedJSONArray n = pack (replicate n '[' ++ unpack "1" ++ replicate n ']')
+
+-- n levels of nested Postgres array groups, e.g. nestedPGArray 3 = "{{{}}}".
+nestedPGArray : Nat -> String
+nestedPGArray n = pack (replicate n '{' ++ replicate n '}')
+
 mkTextRow : List (String, Maybe String) -> Row
 mkTextRow cols = MkRow (map (\(n, v) => (n, FmtText, map strBytes v)) cols)
 
@@ -275,6 +283,30 @@ main = do
   check "parseJSON trailing content rejected" True (isLeft (parseJSON "1 2"))
   check "parseJSON bad literal rejected" True (isLeft (parseJSON "nul"))
   check "getJSON" (Right (JObject [("a", JNumber 1.0)])) (getJSON (mkTextRow [("j", Just "{\"a\":1}")]) "j")
+
+  -- parseJSON's depth budget: moderate nesting still parses, but a server
+  -- couldn't use deeply nested JSON to exhaust the call stack (each level
+  -- is one array-array recursion; see maxJSONDepth in Data.PGJson).
+  check "parseJSON tolerates moderately nested arrays" True
+    (not (isLeft (parseJSON (nestedJSONArray 50))))
+  check "parseJSON rejects excessively nested arrays" True
+    (isLeft (parseJSON (nestedJSONArray 500)))
+
+  -- parsePGArrayValue's depth budget: same idea for Postgres array text
+  -- (see maxArrayDepth in Data.PGValue).
+  check "parsePGArrayValue tolerates moderately nested groups" True
+    (not (isLeft (parsePGArrayValue (nestedPGArray 50))))
+  check "parsePGArrayValue rejects excessively nested groups" True
+    (isLeft (parsePGArrayValue (nestedPGArray 500)))
+
+  -- Helper.validateFrameLength: the sanity check on a server-declared
+  -- message length, guarding against a huge or negative-after-subtracting
+  -- payload size driving an unbounded/desynced read (see Helper.idr).
+  check "validateFrameLength accepts a normal length" (Right 6) (validateFrameLength 10)
+  check "validateFrameLength rejects a length smaller than the prefix itself" True
+    (isLeft (validateFrameLength 3))
+  check "validateFrameLength rejects a payload over the size cap" True
+    (isLeft (validateFrameLength (maxFrameBodySize + 5)))
 
   -- Network.Timeout: cooperative, thread-based withTimeout
   fastResult <- withTimeout 200 (pure 42)
