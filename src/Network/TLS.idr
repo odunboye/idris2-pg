@@ -170,8 +170,10 @@ hkdfKeyIV secret = (hkdfExpandLabel secret "key" [] 32, hkdfExpandLabel secret "
 export
 tlsClientHandshake : Socket -> IO (Either String TLSSession)
 tlsClientHandshake sock = do
-  clientRandom  <- randomBytes 32
-  clientPrivKey <- randomBytes 32
+  Right clientRandom <- randomBytes 32
+    | Left err => pure (Left err)
+  Right clientPrivKey <- randomBytes 32
+    | Left err => pure (Left err)
   let clientPubKey = p256PublicKey clientPrivKey
       clientHello  = buildClientHello clientRandom clientPubKey
   Right () <- sendPlaintextRecord sock 22 clientHello

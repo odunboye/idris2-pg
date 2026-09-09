@@ -20,7 +20,8 @@ import Network.TLSWire
 import Crypto.P256
 import Crypto.HKDF
 import Crypto.SCRAM
-import System.Random
+import System.File
+import Data.Buffer
 import Data.List
 import Data.Bits
 
@@ -29,12 +30,43 @@ public export
 cipherSuiteChaCha20Poly1305 : Nat
 cipherSuiteChaCha20Poly1305 = 0x1303
 
-randomByte : IO Bits8
-randomByte = cast <$> randomRIO {a = Int32} (0, 255)
+bufferBytes : Buffer -> (offset : Nat) -> (len : Nat) -> IO (List Bits8)
+bufferBytes buf offset Z = pure []
+bufferBytes buf offset (S k) = do
+  b    <- getBits8 buf (cast offset)
+  rest <- bufferBytes buf (S offset) k
+  pure (b :: rest)
 
+||| Cryptographically-secure random bytes, read directly from the OS's
+||| CSPRNG (/dev/urandom) rather than a userspace PRNG. contrib's
+||| System.Random resolves to Chez's plain, non-cryptographic `random`
+||| (JS: Math.random()) - fine for the SCRAM client nonce (see
+||| Crypto.SCRAM's module comment, where predictability doesn't matter)
+||| but not for the ECDHE private key generated below, where it would
+||| make the key recoverable.
 export
-randomBytes : Nat -> IO (List Bits8)
-randomBytes n = traverse (const randomByte) (replicate n ())
+randomBytes : Nat -> IO (Either String (List Bits8))
+randomBytes n = do
+  Right fh <- openFile "/dev/urandom" Read
+    | Left err => pure (Left ("TLS: could not open /dev/urandom: " ++ show err))
+  Just buf <- newBuffer (cast n)
+    | Nothing => do
+        closeFile fh
+        pure (Left "TLS: could not allocate random buffer")
+  result <- readAll fh buf 0
+  closeFile fh
+  pure result
+  where
+    readAll : File -> Buffer -> (got : Int) -> IO (Either String (List Bits8))
+    readAll fh buf got =
+      if got >= cast n
+         then Right <$> bufferBytes buf 0 n
+         else do
+           Right r <- readBufferData fh buf got (cast n - got)
+             | Left err => pure (Left "TLS: could not read /dev/urandom")
+           if r <= 0
+              then pure (Left "TLS: /dev/urandom read returned no data")
+              else readAll fh buf (got + r)
 
 extSupportedVersionsBody : Bytes
 extSupportedVersionsBody = [u8 2] ++ u16 0x0304  -- just TLS 1.3
