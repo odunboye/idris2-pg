@@ -24,6 +24,23 @@ jobs:
           ./build/exec/idris2-pg-unit-test | tee unit-test-output.txt
           ! grep -q '^FAIL' unit-test-output.txt
 
+  # Property-based tests (idris2-hedgehog) - round-trip pairs and algebraic
+  # invariants over random input. These also don't touch a real database.
+  property-based-test:
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build idris2-pg
+        run: pack build idris2-pg.ipkg
+
+      - name: Build and run property-based tests
+        working-directory: test
+        run: |
+          pack build prop-test.ipkg
+          ./build/exec/idris2-pg-prop-test
+
   # End-to-end CRUD smoke test against a real Postgres.
   live-crud-test:
     runs-on: ubuntu-latest

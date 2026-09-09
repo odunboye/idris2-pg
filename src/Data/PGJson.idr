@@ -90,7 +90,9 @@ parseNumber cs = case span isNumChar cs of
 -- A budget on remaining container nesting, decremented only at points that
 -- open a new '{'/'[' - without it, deeply nested server-supplied JSON text
 -- could exhaust the call stack (these three functions recurse into each
--- other once per nesting level).
+-- other once per nesting level). Exported so tests can check the exact
+-- boundary rather than duplicating the number.
+public export
 maxJSONDepth : Nat
 maxJSONDepth = 100
 

@@ -252,7 +252,9 @@ toElement wasQuoted cs =
 -- A budget on remaining "{...}" nesting, decremented only when a new group
 -- opens - without it, a deeply nested server-supplied array text could
 -- exhaust the call stack (parseValue/parseGroup recurse into each other
--- once per nesting level).
+-- once per nesting level). Exported so tests can check the exact boundary
+-- rather than duplicating the number.
+public export
 maxArrayDepth : Nat
 maxArrayDepth = 100
 

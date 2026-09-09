@@ -192,6 +192,19 @@ pack build unit-test.ipkg
 ./build/exec/idris2-pg-unit-test
 ```
 
+Property-based tests ([idris2-hedgehog](https://github.com/stefan-hoeck/idris2-hedgehog),
+no database needed): round-trip pairs (codecs, base64, AEAD encrypt/decrypt)
+and algebraic invariants (X25519/P-256 Diffie-Hellman agreement symmetry)
+generalized over random input, rather than the fixed examples/RFC vectors
+the unit tests use. See `test/src/PropTests.idr` for what's covered and
+what's deliberately out of scope.
+
+```sh
+cd test
+pack build prop-test.ipkg
+./build/exec/idris2-pg-prop-test
+```
+
 CRUD smoke test (needs a real Postgres — connection details come from
 `PG_TEST_HOST`/`PG_TEST_PORT`/`PG_TEST_USER`/`PG_TEST_PASSWORD`/`PG_TEST_DB`,
 defaulting to `127.0.0.1:5432`/`testuser`/`testpass`/`testdb`). A plain
@@ -241,8 +254,9 @@ psql -h 127.0.0.1 -U testuser -d testdb -c "ALTER SYSTEM SET ssl = on;"
 docker restart idris2-pg-test
 ```
 
-CI (`.github/workflows/ci.yml`) runs the unit tests plus both smoke test
-variants (SCRAM and MD5) on every push/PR; TLS is not yet part of that
+CI (`.github/workflows/ci.yml`) runs the unit tests, the property-based
+tests, and both smoke test variants (SCRAM and MD5) on every push/PR; TLS
+is not yet part of that
 matrix (setting up SSL on a GitHub Actions service container needs
 filesystem access this project hasn't wired into CI yet - see above for
 running it manually) but is fully covered by the unit tests plus manual
