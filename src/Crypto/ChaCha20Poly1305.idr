@@ -38,10 +38,20 @@ macData aad ciphertext =
 -- Crypto.Curve25519 about what this runtime can and can't actually
 -- guarantee. Exported since Network.TLS's Finished check and
 -- Crypto.SCRAM's server-signature check need the same property.
+--
+-- Accumulates with OR, not XOR: XOR-folding the per-byte differences
+-- together (as an earlier version of this function did) lets differences
+-- in separate bytes cancel each other out, so two genuinely different
+-- byte strings could fold to a zero accumulator - collapsing a 16-byte
+-- tag's ~128-bit security to roughly 8 bits (one accumulator byte).
+-- OR only ever sets bits, never clears them, so any nonzero per-byte
+-- difference makes the final accumulator nonzero regardless of what the
+-- other bytes contributed - caught by a property test generating random
+-- tamper positions (test/src/PropTests.idr).
 export
 constantTimeEq : List Bits8 -> List Bits8 -> Bool
 constantTimeEq xs ys =
-  length xs == length ys && foldl xor 0 (zipWith xor xs ys) == 0
+  length xs == length ys && foldl (\acc, b => acc .|. b) 0 (zipWith xor xs ys) == 0
 
 ||| Encrypts `plaintext` under `key` (32 bytes) and `nonce` (12 bytes),
 ||| authenticating `aad` alongside it. Returns (ciphertext, 16-byte tag).
