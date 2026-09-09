@@ -175,11 +175,13 @@ queryRows db stmt params = do
 ||| Only getInt/getInteger/getBool/getDouble/getText understand binary
 ||| format (see their doc comments); the others (getDate/getTimestamp/
 ||| getArray*/getJSON) only support text and will fail clearly if used on
-||| a binary-format column. Unlike text mode, a type mismatch here (e.g.
-||| calling getDouble on a binary int4 column) is not guaranteed to fail
-||| cleanly - binary formats don't self-describe their type the way text
-||| does, so this is a "you must get the types right" opt-in, not a safer
-||| default.
+||| a binary-format column. getInt/getInteger/getBool/getDouble check the
+||| column's declared type OID (from RowDescription) against what each
+||| expects, so calling e.g. getDouble on a binary int4 column now fails
+||| cleanly rather than silently misreading the bytes - but that check is
+||| a fixed table of builtin OIDs (see BuiltinOid), not a full pg_type
+||| lookup, so it's still an opt-in you must get broadly right, not a
+||| fully safe default.
 public export
 queryRowsBinary : DB -> String -> List (Maybe String) -> IO (Either PGError (List Row))
 queryRowsBinary db stmt params = do
@@ -214,15 +216,26 @@ rollbackTx : DB -> IO (Either PGError String)
 rollbackTx db = execCommand db "ROLLBACK" []
 
 ||| Runs `action` inside BEGIN/COMMIT, rolling back instead if it returns a
-||| Left. Either way, `action`'s result is returned unchanged.
+||| Left. If BEGIN itself fails, `action` never runs and BEGIN's error is
+||| returned. If `action` succeeds but COMMIT fails, COMMIT's error is
+||| returned (not `action`'s `Right`) - callers must not assume a `Right`
+||| means the transaction was durably committed unless this is checked. On
+||| a `Left`, `action`'s own error is returned even if the follow-up
+||| ROLLBACK also fails, since it's the primary, more actionable cause.
 public export
 withTransaction : DB -> IO (Either PGError a) -> IO (Either PGError a)
 withTransaction db action = do
-  _ <- beginTx db
+  Right _ <- beginTx db
+    | Left err => pure (Left err)
   result <- action
   case result of
-       Right _ => do _ <- commitTx db; pure result
-       Left _  => do _ <- rollbackTx db; pure result
+       Right val => do
+         Right _ <- commitTx db
+           | Left err => pure (Left err)
+         pure (Right val)
+       Left err => do
+         _ <- rollbackTx db
+         pure (Left err)
 
 quoteIdent : String -> String
 quoteIdent s = "\"" ++ pack (concatMap escapeChar (unpack s)) ++ "\""

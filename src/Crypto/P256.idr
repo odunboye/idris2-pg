@@ -116,12 +116,25 @@ encodeBE32 n = reverse (go n 32)
     go _ Z     = []
     go m (S k) = cast (m .&. 0xff) :: go (m `shiftR` 8) k
 
+-- Rejects a peer "public key" that isn't actually a point on the curve
+-- (e.g. arbitrary/attacker-chosen coordinates) before it's ever fed into
+-- scalarMul - P-256 has cofactor 1, so on-curve is sufficient here, no
+-- separate subgroup check is needed. x, y are also required to be
+-- canonical (< p256); decodeBE only ever produces non-negative values,
+-- so no separate >= 0 check is needed.
+onCurve : Integer -> Integer -> Bool
+onCurve x y =
+  x < p256 && y < p256
+  && fieldMul y y == fieldAdd (fieldAdd (fieldMul x (fieldMul x x)) (fieldMul aParam x)) bParam
+
 -- SEC1 uncompressed point format: 0x04 || X (32 bytes BE) || Y (32 bytes BE).
 decodeUncompressedPoint : List Bits8 -> Maybe PPoint
 decodeUncompressedPoint (0x04 :: rest) =
   if length rest == 64
      then let (xBytes, yBytes) = splitAt 32 rest
-          in Just (Affine (decodeBE xBytes) (decodeBE yBytes))
+              x = decodeBE xBytes
+              y = decodeBE yBytes
+          in if onCurve x y then Just (Affine x y) else Nothing
      else Nothing
 decodeUncompressedPoint _ = Nothing
 

@@ -8,7 +8,9 @@ import Crypto.MD5
 import Crypto.SHA256
 import Crypto.SCRAM
 import Crypto.Curve25519
+import Crypto.P256
 import Crypto.ChaCha20
+import Data.Maybe
 import Crypto.Poly1305
 import Crypto.ChaCha20Poly1305
 import Crypto.HKDF
@@ -45,11 +47,13 @@ nestedJSONArray n = pack (replicate n '[' ++ unpack "1" ++ replicate n ']')
 nestedPGArray : Nat -> String
 nestedPGArray n = pack (replicate n '{' ++ replicate n '}')
 
+-- OID is irrelevant for text-format columns (checkBinaryOid never
+-- inspects it), so it's a fixed placeholder here rather than a parameter.
 mkTextRow : List (String, Maybe String) -> Row
-mkTextRow cols = MkRow (map (\(n, v) => (n, FmtText, map strBytes v)) cols)
+mkTextRow cols = MkRow (map (\(n, v) => (n, FmtText, 0, map strBytes v)) cols)
 
-mkBinaryRow : List (String, Maybe (List Bits8)) -> Row
-mkBinaryRow cols = MkRow (map (\(n, v) => (n, FmtBinary, v)) cols)
+mkBinaryRow : List (String, Int, Maybe (List Bits8)) -> Row
+mkBinaryRow cols = MkRow (map (\(n, oid, v) => (n, FmtBinary, oid, v)) cols)
 
 -- Checks that `bytes` is [tag] ++ encodeInt32 len ++ payload with
 -- len == 4 + length payload (i.e. the frame is internally consistent),
@@ -250,19 +254,31 @@ main = do
   check "getDouble ok" (Right 3.5) (getDouble (mkTextRow [("d", Just "3.5")]) "d")
 
   -- binary-format value decoding (Data.PGBinary, via getInt/getBool/getDouble)
-  check "getInt binary int2" (Right 300) (getInt (mkBinaryRow [("n", Just (encodeInt16 300))]) "n")
-  check "getInt binary int4" (Right 70000) (getInt (mkBinaryRow [("n", Just (encodeInt32 70000))]) "n")
-  check "getInt binary int8" (Right 300) (getInt (mkBinaryRow [("n", Just [0, 0, 0, 0, 0, 0, 1, 0x2c])]) "n")
-  check "getInteger binary int8 widens" (Right 300) (getInteger (mkBinaryRow [("n", Just [0, 0, 0, 0, 0, 0, 1, 0x2c])]) "n")
-  check "getBool binary true" (Right True) (getBool (mkBinaryRow [("b", Just [1])]) "b")
-  check "getBool binary false" (Right False) (getBool (mkBinaryRow [("b", Just [0])]) "b")
-  check "getDouble binary float4 1.0" (Right 1.0) (getDouble (mkBinaryRow [("d", Just [0x3f, 0x80, 0x00, 0x00])]) "d")
+  -- OIDs: bool=16, int8=20, int2=21, int4=23, text=25, float4=700, float8=701
+  check "getInt binary int2" (Right 300) (getInt (mkBinaryRow [("n", 21, Just (encodeInt16 300))]) "n")
+  check "getInt binary int4" (Right 70000) (getInt (mkBinaryRow [("n", 23, Just (encodeInt32 70000))]) "n")
+  check "getInt binary int8" (Right 300) (getInt (mkBinaryRow [("n", 20, Just [0, 0, 0, 0, 0, 0, 1, 0x2c])]) "n")
+  check "getInteger binary int8 widens" (Right 300) (getInteger (mkBinaryRow [("n", 20, Just [0, 0, 0, 0, 0, 0, 1, 0x2c])]) "n")
+  check "getBool binary true" (Right True) (getBool (mkBinaryRow [("b", 16, Just [1])]) "b")
+  check "getBool binary false" (Right False) (getBool (mkBinaryRow [("b", 16, Just [0])]) "b")
+  check "getDouble binary float4 1.0" (Right 1.0) (getDouble (mkBinaryRow [("d", 700, Just [0x3f, 0x80, 0x00, 0x00])]) "d")
   check "getDouble binary float8 1.0" (Right 1.0)
-    (getDouble (mkBinaryRow [("d", Just [0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])]) "d")
+    (getDouble (mkBinaryRow [("d", 701, Just [0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])]) "d")
   check "getInt binary wrong width reports a clear error" True
-    (isLeft (getInt (mkBinaryRow [("n", Just [1, 2, 3])]) "n"))
+    (isLeft (getInt (mkBinaryRow [("n", 23, Just [1, 2, 3])]) "n"))
+  check "getInt binary rejects a mismatched type OID" True
+    (isLeft (getInt (mkBinaryRow [("n", 700, Just [0x3f, 0x80, 0x00, 0x00])]) "n"))
   check "columnByName works for binary text-like column" (Just (Just "hi"))
-    (columnByName (mkBinaryRow [("s", Just (strBytes "hi"))]) "s")
+    (columnByName (mkBinaryRow [("s", 25, Just (strBytes "hi"))]) "s")
+
+  -- UTF-8 (Helper.stringToBytes/bytesToString), not the Latin-1-style byte
+  -- mapping this used to do - accented letters, non-Latin scripts, and an
+  -- emoji all survive a round trip.
+  let utf8Text = "café — naïve façade 日本語 🎉"
+  check "stringToBytes/bytesToString round-trips non-ASCII text" utf8Text
+    (bytesToString (stringToBytes utf8Text))
+  check "getText round-trips non-ASCII text through a Row" (Right utf8Text)
+    (getText (MkRow [("s", FmtText, 0, Just (stringToBytes utf8Text))]) "s")
   check "getInteger big" (Right 123456789012345678901234567890)
     (getInteger (mkTextRow [("n", Just "123456789012345678901234567890")]) "n")
   check "getDate ok" (Right (MkPGDate 2024 3 7)) (getDate (mkTextRow [("d", Just "2024-03-07")]) "d")
@@ -326,6 +342,18 @@ main = do
   check "x25519PublicKey derives Bob's public key" bPub (toHex (x25519PublicKey bPriv))
   check "x25519 shared secret (Alice's view)" shared (toHex (x25519 aPriv (hexToBytes bPub)))
   check "x25519 shared secret (Bob's view)" shared (toHex (x25519 bPriv (hexToBytes aPub)))
+
+  -- Crypto.P256: a genuine peer point (from p256PublicKey) is accepted,
+  -- but an arbitrary/off-curve "point" - the same shape a compromised or
+  -- buggy peer could hand this client - is rejected before it ever
+  -- reaches scalar multiplication.
+  let p256PrivA = replicate 31 0 ++ [7]
+  let p256PrivB = replicate 31 0 ++ [9]
+  check "p256SharedSecret accepts a genuine on-curve peer point" True
+    (isJust (p256SharedSecret p256PrivA (p256PublicKey p256PrivB)))
+  let offCurvePoint = [0x04] ++ replicate 31 0 ++ [1] ++ replicate 31 0 ++ [1]  -- (1, 1); not on the curve
+  check "p256SharedSecret rejects an off-curve peer point" Nothing
+    (p256SharedSecret p256PrivA offCurvePoint)
 
   -- Crypto.ChaCha20, against Python cryptography-generated reference
   -- keystreams (a single-block and a multi-block, non-64-byte-aligned case).

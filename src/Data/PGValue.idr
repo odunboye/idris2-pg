@@ -23,6 +23,7 @@ data BuiltinOid
   | OidFloat4 | OidFloat8 | OidNumeric
   | OidDate | OidTimestamp | OidTimestamptz
   | OidOther Int
+%runElab derive "BuiltinOid" [Eq, Show]
 
 public export
 builtinOid : Int -> BuiltinOid
@@ -48,17 +49,18 @@ toColFormat : Int -> ColFormat
 toColFormat 1 = FmtBinary
 toColFormat _ = FmtText
 
-||| One decoded result row: column name, wire format, and its (possibly
-||| NULL) raw value, in column order. Format is text unless the query was
-||| run via queryRowsBinary.
+||| One decoded result row: column name, wire format, its Postgres type
+||| OID (from RowDescription), and its (possibly NULL) raw value, in
+||| column order. Format is text unless the query was run via
+||| queryRowsBinary.
 public export
 record Row where
   constructor MkRow
-  columns : List (String, ColFormat, Maybe Bytes)
+  columns : List (String, ColFormat, Int, Maybe Bytes)
 %runElab derive "Row" [Show]
 
-zipCols : List FieldDescription -> List (Maybe Bytes) -> List (String, ColFormat, Maybe Bytes)
-zipCols (f :: fs) (c :: cs) = (name f, toColFormat (formatCode f), c) :: zipCols fs cs
+zipCols : List FieldDescription -> List (Maybe Bytes) -> List (String, ColFormat, Int, Maybe Bytes)
+zipCols (f :: fs) (c :: cs) = (name f, toColFormat (formatCode f), typeOID f, c) :: zipCols fs cs
 zipCols _          _        = []
 
 public export
@@ -73,11 +75,23 @@ toRows qr = case description qr of
      Nothing => []
      Just desc => map (toRow desc) (rows qr)
 
-getRawColumn : Row -> String -> Either String (ColFormat, Maybe Bytes)
+getRawColumn : Row -> String -> Either String (ColFormat, Int, Maybe Bytes)
 getRawColumn (MkRow cols) colName =
-  case find (\(n, _, _) => n == colName) cols of
-       Nothing            => Left ("No such column: " ++ colName)
-       Just (_, fmt, b)   => Right (fmt, b)
+  case find (\(n, _, _, _) => n == colName) cols of
+       Nothing                 => Left ("No such column: " ++ colName)
+       Just (_, fmt, oid, b)   => Right (fmt, oid, b)
+
+||| Rejects a binary-format column whose declared type OID isn't one of
+||| `expected` - two Postgres types can share a byte width (e.g. int4 and
+||| float4 are both 4 bytes), so width alone can't tell them apart. A
+||| text-format column is always accepted here; its shape is already
+||| validated by the text parser itself.
+checkBinaryOid : String -> ColFormat -> Int -> List BuiltinOid -> Either String ()
+checkBinaryOid colName FmtText   _   _        = Right ()
+checkBinaryOid colName FmtBinary oid expected =
+  if elem (builtinOid oid) expected
+     then Right ()
+     else Left ("Column " ++ colName ++ " is not one of the expected binary types (got OID " ++ show oid ++ ")")
 
 ||| Text-shaped view of a column regardless of its wire format (UTF-8
 ||| decoding raw bytes is correct for both - Postgres's binary format for
@@ -86,25 +100,26 @@ getRawColumn (MkRow cols) colName =
 public export
 columnByName : Row -> String -> Maybe (Maybe String)
 columnByName row colName = case getRawColumn row colName of
-     Left _              => Nothing
-     Right (_, Nothing)  => Just Nothing
-     Right (_, Just b)   => Just (Just (bytesToString b))
+     Left _                 => Nothing
+     Right (_, _, Nothing)  => Just Nothing
+     Right (_, _, Just b)   => Just (Just (bytesToString b))
 
 public export
 getText : Row -> String -> Either String String
 getText row colName = do
-  (_, bytes) <- getRawColumn row colName
+  (_, _, bytes) <- getRawColumn row colName
   case bytes of
        Nothing => Left (colName ++ " is NULL")
        Just b  => Right (bytesToString b)
 
 ||| Understands both formats: text (parsed as decimal digits) and binary
-||| (dispatched on byte width - 2/4/8 bytes for int2/int4/int8). See
-||| queryRowsBinary's doc comment for the binary-mode type-mismatch caveat.
+||| (dispatched on byte width - 2/4/8 bytes for int2/int4/int8 - and now
+||| also checked against the column's declared type OID).
 public export
 getInt : Row -> String -> Either String Int
 getInt row colName = do
-  (fmt, bytes) <- getRawColumn row colName
+  (fmt, oid, bytes) <- getRawColumn row colName
+  checkBinaryOid colName fmt oid [OidInt2, OidInt4, OidInt8]
   case bytes of
        Nothing => Left (colName ++ " is NULL")
        Just b  => case fmt of
@@ -118,12 +133,13 @@ getInt row colName = do
 ||| Understands both formats: text (parsed as a decimal/exponent literal)
 ||| and binary (dispatched on byte width - 4 bytes for float4, 8 for
 ||| float8, decoded via from-scratch IEEE754 bit manipulation - see
-||| Data.PGBinary). See queryRowsBinary's doc comment for the binary-mode
-||| type-mismatch caveat.
+||| Data.PGBinary - and now also checked against the column's declared
+||| type OID).
 public export
 getDouble : Row -> String -> Either String Double
 getDouble row colName = do
-  (fmt, bytes) <- getRawColumn row colName
+  (fmt, oid, bytes) <- getRawColumn row colName
+  checkBinaryOid colName fmt oid [OidFloat4, OidFloat8]
   case bytes of
        Nothing => Left (colName ++ " is NULL")
        Just b  => case fmt of
@@ -135,11 +151,13 @@ getDouble row colName = do
                  Right d  => Right d
 
 ||| Understands both formats: text ("t"/"true"/"1" or "f"/"false"/"0") and
-||| binary (a single byte, 0 = False, nonzero = True).
+||| binary (a single byte, 0 = False, nonzero = True - and now also
+||| checked against the column's declared type OID).
 public export
 getBool : Row -> String -> Either String Bool
 getBool row colName = do
-  (fmt, bytes) <- getRawColumn row colName
+  (fmt, oid, bytes) <- getRawColumn row colName
+  checkBinaryOid colName fmt oid [OidBool]
   case bytes of
        Nothing => Left (colName ++ " is NULL")
        Just b  => case fmt of
@@ -158,11 +176,13 @@ getBool row colName = do
 ||| Arbitrary-precision, for `numeric`/`bigint` values that don't fit `Int`.
 ||| In binary mode this only understands int2/int4/int8 (dispatched by
 ||| byte width, then widened) - binary `numeric`'s own wire format is a
-||| distinct, more involved encoding that isn't supported here.
+||| distinct, more involved encoding that isn't supported here, so
+||| OidNumeric is deliberately not in the accepted OID list below.
 public export
 getInteger : Row -> String -> Either String Integer
 getInteger row colName = do
-  (fmt, bytes) <- getRawColumn row colName
+  (fmt, oid, bytes) <- getRawColumn row colName
+  checkBinaryOid colName fmt oid [OidInt2, OidInt4, OidInt8]
   case bytes of
        Nothing => Left (colName ++ " is NULL")
        Just b  => case fmt of

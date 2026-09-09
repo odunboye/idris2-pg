@@ -29,9 +29,71 @@ getConnection s addr p= do
               _ => do
                 pure Nothing
 
+-- Encodes/decodes bytes as UTF-8 rather than treating each byte as its
+-- own Latin-1-range codepoint (Idris2's Cast Char Bits8/Cast Bits8 Char
+-- do the latter, which corrupts any codepoint above 0x7F) - needed since
+-- Postgres's default client_encoding is UTF8 and column/parameter text
+-- routinely contains accented letters, non-Latin scripts, or emoji.
+encodeUtf8Char : Char -> List Bits8
+encodeUtf8Char c =
+  let cp = ord c
+  in if cp < 0x80 then [cast cp]
+     else if cp < 0x800 then
+       [ cast (0xC0 .|. (cp `shiftR` 6))
+       , cast (0x80 .|. (cp .&. 0x3F))
+       ]
+     else if cp < 0x10000 then
+       [ cast (0xE0 .|. (cp `shiftR` 12))
+       , cast (0x80 .|. ((cp `shiftR` 6) .&. 0x3F))
+       , cast (0x80 .|. (cp .&. 0x3F))
+       ]
+     else
+       [ cast (0xF0 .|. (cp `shiftR` 18))
+       , cast (0x80 .|. ((cp `shiftR` 12) .&. 0x3F))
+       , cast (0x80 .|. ((cp `shiftR` 6) .&. 0x3F))
+       , cast (0x80 .|. (cp .&. 0x3F))
+       ]
+
+-- Raw UTF-8 bytes, for extended-protocol parameter values.
+public export
+stringToBytes : String -> Bytes
+stringToBytes s = concatMap encodeUtf8Char (unpack s)
+
+-- U+FFFD, substituted for a malformed/truncated byte sequence rather than
+-- failing outright - bytesToString is used pervasively as a total
+-- String-returning function, and Postgres is trusted to send well-formed
+-- UTF-8 in practice; this only kicks in on a genuinely corrupt response.
+replacementChar : Char
+replacementChar = chr 0xFFFD
+
+decodeUtf8 : List Bits8 -> List Char
+decodeUtf8 [] = []
+decodeUtf8 (b :: bs) =
+  if b < 0x80
+     then chr (cast b) :: decodeUtf8 bs
+  else if (b .&. 0xE0) == 0xC0
+     then case bs of
+               (b1 :: rest) =>
+                 chr (((cast b .&. 0x1F) `shiftL` 6) .|. (cast b1 .&. 0x3F)) :: decodeUtf8 rest
+               [] => [replacementChar]
+  else if (b .&. 0xF0) == 0xE0
+     then case bs of
+               (b1 :: b2 :: rest) =>
+                 chr (((cast b .&. 0x0F) `shiftL` 12) .|. ((cast b1 .&. 0x3F) `shiftL` 6) .|. (cast b2 .&. 0x3F))
+                   :: decodeUtf8 rest
+               _ => [replacementChar]
+  else if (b .&. 0xF8) == 0xF0
+     then case bs of
+               (b1 :: b2 :: b3 :: rest) =>
+                 chr (((cast b .&. 0x07) `shiftL` 18) .|. ((cast b1 .&. 0x3F) `shiftL` 12)
+                       .|. ((cast b2 .&. 0x3F) `shiftL` 6) .|. (cast b3 .&. 0x3F))
+                   :: decodeUtf8 rest
+               _ => [replacementChar]
+  else replacementChar :: decodeUtf8 bs
+
 public export
 bytesToString : List Bits8 -> String
-bytesToString bs = pack (map (chr . cast) bs)
+bytesToString bs = pack (decodeUtf8 bs)
 
 public export
 toInt : Vect 4 Bits8 ->  Int
@@ -137,19 +199,14 @@ decodeInt64 _ = Left "decodeInt64: insufficient bytes"
 -- Encode/decode null-terminated UTF8 string
 public export
 encodeCString : String -> List Bits8
-encodeCString s = map cast (unpack s) ++ [0]
+encodeCString s = stringToBytes s ++ [0]
 
 public export
 decodeCString : List Bits8 -> Either String (String, List Bits8)
 decodeCString bs =
   case span (/= 0) bs of
-    (chars, 0 :: rest) => Right (pack (map cast chars), rest)
+    (chars, 0 :: rest) => Right (bytesToString chars, rest)
     _ => Left "decodeCString: unterminated string"
-
--- Raw (non-null-terminated) UTF8 bytes, for extended-protocol parameter values.
-public export
-stringToBytes : String -> Bytes
-stringToBytes s = map cast (unpack s)
 
 eitherToMaybe : Either e a -> Maybe a
 eitherToMaybe (Left _) = Nothing
@@ -644,12 +701,21 @@ handleStartupResponse user password conn = go ScramNotStarted init
                 _                  => go scram (startupstep acc msg)
 
 
+-- Prepends (O(1)) rather than `acc.rows ++ [row]` (O(n) per row, O(n^2)
+-- total for n rows in one result set) - rows/errors/notices end up
+-- reversed, so finalizeQueryResult below un-reverses them once a
+-- QueryResult is complete, rather than paying the append cost on every
+-- message.
 querystep : QueryResult -> PGMsg -> QueryResult
 querystep acc (RowDescriptionMsg rd) = { description := Just rd } acc
-querystep acc (DataRowMsg row)       = { rows := acc.rows ++ [row] } acc
-querystep acc (ErrorMsg e)           = { errors := acc.errors ++ [e] } acc
-querystep acc (NoticeMsg n)          = { notices := acc.notices ++ [n] } acc
+querystep acc (DataRowMsg row)       = { rows := row :: acc.rows } acc
+querystep acc (ErrorMsg e)           = { errors := e :: acc.errors } acc
+querystep acc (NoticeMsg n)          = { notices := n :: acc.notices } acc
 querystep acc _                      = acc
+
+finalizeQueryResult : QueryResult -> QueryResult
+finalizeQueryResult qr =
+  { rows := reverse qr.rows, errors := reverse qr.errors, notices := reverse qr.notices } qr
 
 emptyQueryResult : QueryResult
 emptyQueryResult = MkQueryResult Nothing [] Nothing Nothing [] []
@@ -681,7 +747,7 @@ handleQueryResponses db = go Nothing []
                ReadyForQueryMsg r =>
                  case pending of
                       Nothing => pure (Right (setStatusOnLast (MkReadyForQuery r) completed))
-                      Just _  => pure (Right (completed ++ [{ status := Just (MkReadyForQuery r) } acc]))
-               CommandCompleteMsg c => go Nothing (completed ++ [{ commandTag := Just c } acc])
-               EmptyQueryResponseMsg => go Nothing (completed ++ [acc])
+                      Just _  => pure (Right (completed ++ [finalizeQueryResult ({ status := Just (MkReadyForQuery r) } acc)]))
+               CommandCompleteMsg c => go Nothing (completed ++ [finalizeQueryResult ({ commandTag := Just c } acc)])
+               EmptyQueryResponseMsg => go Nothing (completed ++ [finalizeQueryResult acc])
                _ => go (Just (querystep acc msg)) completed

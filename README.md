@@ -171,8 +171,11 @@ machine-in-the-middle presenting its own certificate wouldn't be detected.
 Real X.509 parsing plus RSA/ECDSA signature verification is a large
 enough sub-project (ASN.1 DER, a trust store) that it's a documented
 follow-up rather than a blocker here. Everything else - the ECDHE key
-exchange, the key schedule, and the record encryption - is exactly as
-strong as a certificate-verifying client's.
+exchange (peer P-256 points are validated to lie on the curve before use),
+the key schedule, and the record encryption - is as strong as a
+certificate-verifying client's, with one caveat: the field arithmetic
+isn't constant-time (see `Crypto.P256`'s module comment), so it doesn't
+defend against a timing side-channel from a co-located attacker.
 
 ### Errors
 
