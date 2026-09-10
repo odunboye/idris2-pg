@@ -9,6 +9,7 @@ module Crypto.MD5
 import Data.Bits
 import Data.Fin
 import Data.List
+import Data.Utf8
 
 %default covering
 
@@ -137,9 +138,14 @@ toHex bytes = pack (concatMap byteHex bytes)
     byteHex b = [ hexDigit (b `shiftR` 4), hexDigit (b .&. 0xf) ]
 
 ||| Postgres md5 auth: "md5" ++ hex(md5(hex(md5(password ++ user)) ++ salt))
+||| password ++ user goes through the real UTF-8 codec (Data.Utf8), not a
+||| per-Char truncating cast - Postgres usernames/passwords aren't limited
+||| to ASCII. `inner` itself is always a hex string (ASCII-only by
+||| construction), so its own encoding for the outer hash can't matter
+||| either way.
 public export
 pgMD5Password : (password : String) -> (user : String) -> (salt : List Bits8) -> String
 pgMD5Password password user salt =
-  let inner = toHex (md5 (map (cast . ord) (unpack (password ++ user))))
+  let inner = toHex (md5 (stringToBytes (password ++ user)))
       outer = toHex (md5 (map (cast . ord) (unpack inner) ++ salt))
   in "md5" ++ outer

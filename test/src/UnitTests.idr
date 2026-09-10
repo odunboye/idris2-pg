@@ -16,6 +16,7 @@ import Crypto.ChaCha20Poly1305
 import Crypto.HKDF
 import Network.TLSWire
 import Network.TLSHandshake
+import Network.TLS
 import Data.PGValue
 import Network.Timeout
 import System
@@ -83,6 +84,14 @@ main = do
   check "md5 pangram"  "9e107d9d372bb6826bd81d3542a419d6"
     (toHex (md5 (strBytes "The quick brown fox jumps over the lazy dog")))
 
+  -- pgMD5Password with a non-ASCII password/username, against a
+  -- Python hashlib reference value - confirms it now goes through a
+  -- real UTF-8 codec (Data.Utf8, via Helper) rather than a per-Char
+  -- truncating cast.
+  check "pgMD5Password with a non-ASCII password and username"
+    "md51624175f66e00dca25e3ed157168c105"
+    (pgMD5Password "pâsswörd🔒" "tëst_user" [0x01, 0x02, 0x03, 0x04])
+
   -- SCRAM-SHA-256 building blocks (against Python hashlib/hmac/base64
   -- reference values)
   check "hmac-sha256" "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
@@ -91,6 +100,13 @@ main = do
     (toHex (pbkdf2Sha256 (strBytes "password") (strBytes "salt") 1))
   check "pbkdf2-hmac-sha256 4096 iters" "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
     (toHex (pbkdf2Sha256 (strBytes "password") (strBytes "salt") 4096))
+  -- The SCRAM path's saltedPassword computation with a non-ASCII password,
+  -- against a Python hashlib.pbkdf2_hmac reference - confirms it now goes
+  -- through Data.Utf8's real UTF-8 codec (used via computeClientFinal's
+  -- `stringToBytes password`), not the old per-Char truncating cast.
+  check "pbkdf2-hmac-sha256 with a non-ASCII password"
+    "d6546da4ce55e509eea527d119c5d4bab3a73da9810ecead9b138e112838b17c"
+    (toHex (pbkdf2Sha256 (stringToBytes "pâsswörd🔒") [0x10, 0x20, 0x30] 4096))
   check "base64Encode empty" "" (base64Encode [])
   check "base64Encode foobar" "Zm9vYmFy" (base64Encode (strBytes "foobar"))
   check "base64Encode padding 1" "Zm8=" (base64Encode (strBytes "fo"))
@@ -515,7 +531,24 @@ main = do
        Just (ty, _, rest) => do
          check "buildClientHello: type" htClientHello ty
          check "buildClientHello: no trailing bytes" (the (List Bits8) []) rest
+
+  -- Network.TLS.chunksOf: tlsSend's fragmentation into <= 16384-byte TLS
+  -- records (RFC 8446 section 5.1's per-record plaintext cap). 20000
+  -- matches the exact size a prior bug produced as a single oversized
+  -- record (a large COPY payload/Bind parameter).
+  let bigPayload = replicate 20000 (the Bits8 0xAB)
+  let chunked = chunksOf maxPlaintextPerRecord bigPayload
+  check "chunksOf splits into records no larger than the TLS cap" True
+    (all (\c => length c <= maxPlaintextPerRecord) chunked)
+  check "chunksOf produces exactly the chunk count a 20000-byte payload needs" 2
+    (length chunked)
+  check "chunksOf preserves every byte, in order" bigPayload (concat chunked)
+  check "chunksOf on data already under the cap is a single chunk" [bigPayload500]
+    (chunksOf maxPlaintextPerRecord bigPayload500)
   where
+    bigPayload500 : List Bits8
+    bigPayload500 = replicate 500 (the Bits8 0xCD)
+
     isLeft : Either a b -> Bool
     isLeft (Left _) = True
     isLeft (Right _) = False

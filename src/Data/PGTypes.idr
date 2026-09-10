@@ -436,3 +436,10 @@ record DB where
   -- cleanup (Terminate frees them all on close).
   stmtCache   : IORef (List (String, String))
   stmtCounter : IORef Int
+  -- NotificationResponse can arrive interleaved with any query's own
+  -- responses (Postgres's asynchronous-message rule), not just while
+  -- waitForNotification is the one reading - handleQueryResponses queues
+  -- one here instead of mistaking it for part of the query result it's
+  -- currently assembling; waitForNotification drains this before it
+  -- blocks on a fresh read.
+  notifQueue  : IORef (List Notification)

@@ -17,14 +17,12 @@ import Data.Bits
 import Data.List
 import Data.List1
 import Data.String
+import Data.Utf8
 import Derive.Prelude
 import System.Random
 
 %language ElabReflection
 %default covering
-
-strBytes : String -> List Bits8
-strBytes s = map (cast . ord) (unpack s)
 
 export
 hmacSha256 : List Bits8 -> List Bits8 -> List Bits8
@@ -186,16 +184,16 @@ computeClientFinal password clientNonce clientFirstBare serverFirstRaw sf =
   if not (isPrefixOf clientNonce (nonce sf))
      then Nothing
      else
-       let saltedPassword = pbkdf2Sha256 (strBytes password) (salt sf) (iterations sf)
-           clientKey = hmacSha256 saltedPassword (strBytes "Client Key")
+       let saltedPassword = pbkdf2Sha256 (stringToBytes password) (salt sf) (iterations sf)
+           clientKey = hmacSha256 saltedPassword (stringToBytes "Client Key")
            storedKey = sha256 clientKey
-           clientFinalWithoutProof = "c=biws,r=" ++ nonce sf  -- biws = base64Encode(strBytes "n,,")
+           clientFinalWithoutProof = "c=biws,r=" ++ nonce sf  -- biws = base64Encode(stringToBytes "n,,")
            authMessage = clientFirstBare ++ "," ++ serverFirstRaw ++ "," ++ clientFinalWithoutProof
-           clientSignature = hmacSha256 storedKey (strBytes authMessage)
+           clientSignature = hmacSha256 storedKey (stringToBytes authMessage)
            clientProof = zipWith xor clientKey clientSignature
            finalMessage = clientFinalWithoutProof ++ ",p=" ++ base64Encode clientProof
-           serverKey = hmacSha256 saltedPassword (strBytes "Server Key")
-           serverSignature = hmacSha256 serverKey (strBytes authMessage)
+           serverKey = hmacSha256 saltedPassword (stringToBytes "Server Key")
+           serverSignature = hmacSha256 serverKey (stringToBytes authMessage)
        in Just (MkScramClientFinal finalMessage serverSignature)
 
 ||| Checks a server-final-message ("v=<base64 signature>") against the

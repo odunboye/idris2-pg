@@ -260,11 +260,37 @@ tlsClientHandshake sock = do
                                          pure (Right (MkTLSSession sock clientAppKey clientAppIV appWriteSeqRef
                                                                     serverAppKey serverAppIV appReadSeqRef recvBufRef))
 
-||| Sends `bytes` as one TLS application_data record.
+-- RFC 8446 section 5.1: a record's plaintext (before the content-type
+-- byte writeEncryptedRecord appends) must not exceed 2^14 = 16384 bytes -
+-- a larger single record is invalid, and a compliant peer must close the
+-- connection on receiving one. u16's 2-byte record-length header would
+-- also misencode (silently wrap) a ciphertext length past 65535.
+public export
+maxPlaintextPerRecord : Nat
+maxPlaintextPerRecord = 16384
+
+||| Splits `xs` into chunks of at most `n` elements each, in order
+||| (`n` must be positive). Pure so it can be tested directly, without a
+||| live TLS session, against the record-size limit tlsSend enforces.
+export
+chunksOf : (n : Nat) -> List a -> List (List a)
+chunksOf n [] = []
+chunksOf n xs = let (chunk, rest) = splitAt n xs in chunk :: chunksOf n rest
+
+||| Sends `bytes` as one or more TLS application_data records, each no
+||| larger than maxPlaintextPerRecord - large COPY payloads and Bind
+||| parameters routinely exceed a single record's limit.
 export
 tlsSend : TLSSession -> List Bits8 -> IO (Either String ())
-tlsSend session bytes =
-  writeEncryptedRecord (tlsSocket session) (writeKey session) (writeIV session) (writeSeqRef session) 23 bytes
+tlsSend session bytes = go (chunksOf maxPlaintextPerRecord bytes)
+  where
+    go : List (List Bits8) -> IO (Either String ())
+    go []               = pure (Right ())
+    go (chunk :: chunks) = do
+      res <- writeEncryptedRecord (tlsSocket session) (writeKey session) (writeIV session) (writeSeqRef session) 23 chunk
+      case res of
+           Left err => pure (Left err)
+           Right () => go chunks
 
 ||| Reads exactly `n` bytes of decrypted application data, decrypting
 ||| further records as needed and buffering any leftover. A stray

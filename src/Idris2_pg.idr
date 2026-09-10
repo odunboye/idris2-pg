@@ -30,6 +30,11 @@ withReadTimeout db action = case readTimeoutMs (cfg db) of
        res <- withTimeout ms action
        pure (fromMaybe (Left (ConnectionError "operation timed out waiting for the server")) res)
 
+closeConn : PGConnection Connected -> IO ()
+closeConn c = do
+  _ <- close (MkConnected (socket c))
+  pure ()
+
 public export
 connectDB : PGConfig -> IO (Either PGError DB)
 connectDB cfg = withConnectTimeout cfg $ do
@@ -40,19 +45,26 @@ connectDB cfg = withConnectTimeout cfg $ do
          let startupMsg = encode (StartupMsg 3 [("user", user cfg), ("database", database cfg)])
          spgConn <- sendStartup pgConn startupMsg
          case spgConn of
-              Nothing => pure (Left (ConnectionError "Error sending StartupMsg"))
+              Nothing => do
+                closeConn pgConn
+                pure (Left (ConnectionError "Error sending StartupMsg"))
               (Just x) => do
                 let conx = mkConnectedPG x
                 res <- handleStartupResponse (user cfg) (password cfg) conx
                 case res of
-                     Left err => pure (Left err)
+                     Left err => do
+                       closeConn conx
+                       pure (Left err)
                      Right sr => case errors sr of
-                                      (e :: _) => pure (Left (SqlError e))
+                                      (e :: _) => do
+                                        closeConn conx
+                                        pure (Left (SqlError e))
                                       []       => do
                                         ref <- newIORef (map status (ready sr))
                                         cache <- newIORef []
                                         counter <- newIORef 0
-                                        pure (Right (MkDB conx (Just sr) cfg ref cache counter))
+                                        notifs <- newIORef []
+                                        pure (Right (MkDB conx (Just sr) cfg ref cache counter notifs))
 
 -- Records the transaction status from a batch's final ReadyForQuery (the
 -- last result's, since a multi-statement batch shares one at the end) so
@@ -215,27 +227,44 @@ public export
 rollbackTx : DB -> IO (Either PGError String)
 rollbackTx db = execCommand db "ROLLBACK" []
 
-||| Runs `action` inside BEGIN/COMMIT, rolling back instead if it returns a
-||| Left. If BEGIN itself fails, `action` never runs and BEGIN's error is
-||| returned. If `action` succeeds but COMMIT fails, COMMIT's error is
-||| returned (not `action`'s `Right`) - callers must not assume a `Right`
-||| means the transaction was durably committed unless this is checked. On
-||| a `Left`, `action`'s own error is returned even if the follow-up
-||| ROLLBACK also fails, since it's the primary, more actionable cause.
-public export
-withTransaction : DB -> IO (Either PGError a) -> IO (Either PGError a)
-withTransaction db action = do
+withTransaction' : DB -> IO (Either PGError a) -> IO (Either PGError a)
+withTransaction' db action = do
   Right _ <- beginTx db
     | Left err => pure (Left err)
   result <- action
   case result of
        Right val => do
-         Right _ <- commitTx db
+         Right tag <- commitTx db
            | Left err => pure (Left err)
-         pure (Right val)
+         if tag == "COMMIT"
+            then pure (Right val)
+            else pure (Left (ProtocolError ("COMMIT did not commit the transaction (server reported \"" ++ tag ++ "\" - it was likely already aborted by a failed statement inside the action)")))
        Left err => do
          _ <- rollbackTx db
          pure (Left err)
+
+||| Runs `action` inside BEGIN/COMMIT, rolling back instead if it returns a
+||| Left. Rejects nesting outright (Postgres's own nested BEGIN is just a
+||| warning that continues the existing transaction - a nested
+||| withTransaction's COMMIT would then commit the *outer* transaction too,
+||| out from under a later outer rollback; this library doesn't implement
+||| savepoints, so nesting is refused rather than silently mishandled). If
+||| BEGIN itself fails, `action` never runs and BEGIN's error is returned.
+||| If `action` succeeds but COMMIT doesn't report a "COMMIT" command tag,
+||| that's treated as a failure and returned instead of `action`'s `Right`
+||| - Postgres reports COMMIT on an already-aborted transaction as a
+||| successful "ROLLBACK" (not an error), so checking for `Right` alone
+||| isn't enough to know the transaction actually committed. On a `Left`,
+||| `action`'s own error is returned even if the follow-up ROLLBACK also
+||| fails, since it's the primary, more actionable cause.
+public export
+withTransaction : DB -> IO (Either PGError a) -> IO (Either PGError a)
+withTransaction db action = do
+  status <- txStatus db
+  case status of
+       Just InTransaction     => pure (Left (ProtocolError "withTransaction: already inside a transaction (nesting is not supported)"))
+       Just FailedTransaction => pure (Left (ProtocolError "withTransaction: already inside a failed transaction"))
+       _ => withTransaction' db action
 
 quoteIdent : String -> String
 quoteIdent s = "\"" ++ pack (concatMap escapeChar (unpack s)) ++ "\""
@@ -257,12 +286,23 @@ unlistenChannel db channel = execCommand db ("UNLISTEN " ++ quoteIdent channel) 
 
 ||| Blocks until a NOTIFY arrives on any channel this connection is
 ||| listening to (see listenChannel), skipping over any other asynchronous
-||| message (a NoticeMsg, a ParameterStatus change) in between. Bounded by
-||| DB.cfg's readTimeoutMs, if set (see Network.Timeout for what "bounded"
-||| means); blocks indefinitely otherwise.
+||| message (a NoticeMsg, a ParameterStatus change) in between. Checks for
+||| a notification already queued by a prior handleQueryResponses call
+||| first - Postgres can deliver NotificationResponse interleaved with any
+||| query's own responses, not just while this function is the one
+||| reading, so an earlier notification is never lost just because it
+||| arrived while a normal query was running. Bounded by DB.cfg's
+||| readTimeoutMs, if set (see Network.Timeout for what "bounded" means);
+||| blocks indefinitely otherwise.
 public export
 waitForNotification : DB -> IO (Either PGError Notification)
-waitForNotification db = withReadTimeout db (go db)
+waitForNotification db = do
+  queued <- readIORef (notifQueue db)
+  case queued of
+       (n :: rest) => do
+         writeIORef (notifQueue db) rest
+         pure (Right n)
+       [] => withReadTimeout db (go db)
   where
     go : DB -> IO (Either PGError Notification)
     go db = do
@@ -358,7 +398,7 @@ copyIn db sql payload = withReadTimeout db $ do
 
 public export
 closeDB : DB -> IO ()
-closeDB (MkDB pgConn _ _ _ _ _) = do
+closeDB (MkDB pgConn _ _ _ _ _ _) = do
   _ <- pgSend pgConn (encode Terminate)
   _ <- close (MkConnected (socket pgConn))
   pure ()

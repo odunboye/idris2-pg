@@ -26,6 +26,7 @@ modules = Network.Core
         , Network.TLS
         , Data.PGTypes
         , Data.PGJson
+        , Data.Utf8
         , Crypto.MD5
         , Crypto.SHA256
         , Crypto.SCRAM

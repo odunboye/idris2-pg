@@ -1,9 +1,11 @@
 module Main
 
 import Data.IORef
+import Data.List
 import Data.Maybe
 import Data.String
 import System
+import System.Concurrency
 import Idris2_pg
 import Data.PGTypes
 import Data.PGValue
@@ -128,6 +130,31 @@ testTransactions db = do
     | other => putStrLn ("FAIL: expected Idle tx status after commit, got: " ++ show other)
   putStrLn "OK txStatus reports Idle after commit"
 
+  -- Regression test for review finding #1: a failed statement aborts the
+  -- transaction server-side; if the action ignores that and returns
+  -- Right anyway, COMMIT on an aborted transaction succeeds at the wire
+  -- level but actually performs a ROLLBACK (Postgres's documented
+  -- behavior) - withTransaction must report that as a failure, not as
+  -- the action's original Right.
+  abortedResult <- withTransaction db {a = String} $ do
+    _ <- execCommand db "SELECT 1/0" []  -- division by zero: aborts the transaction
+    pure (Right "action ignored the aborted transaction")
+  case abortedResult of
+       Left _  => putStrLn "OK withTransaction reports failure when COMMIT actually performed a ROLLBACK"
+       Right _ => putStrLn "FAIL: withTransaction reported success despite an aborted transaction"
+
+  -- Regression test for review finding #3: nesting is rejected outright
+  -- rather than letting the inner COMMIT end the outer transaction early.
+  nestedResult <- withTransaction db (withTransaction db (execCommand db "INSERT INTO tx_demo (id) VALUES (99)" []))
+  case nestedResult of
+       Left (ProtocolError _) => putStrLn "OK withTransaction rejects nesting"
+       other                  => putStrLn ("FAIL: nested withTransaction was not rejected: " ++ show other)
+  Right rows99 <- queryRows db "SELECT id FROM tx_demo WHERE id = 99" []
+    | Left err => putStrLn ("FAIL select after nested-tx rejection: " ++ displayError err)
+  case rows99 of
+       [] => putStrLn "OK nested withTransaction did not commit any writes"
+       _  => putStrLn "FAIL: nested withTransaction's write was committed"
+
   _ <- execCommand db "DROP TABLE tx_demo" []
   pure ()
 
@@ -221,6 +248,72 @@ testNotify cfg = do
   Right _ <- unlistenChannel dbListener "idris2_pg_test_channel"
     | Left err => putStrLn ("FAIL UNLISTEN: " ++ displayError err)
   closeDB dbListener
+
+testNotifyDuringQuery : PGConfig -> IO ()
+testNotifyDuringQuery cfg = do
+  -- Regression test for review finding #5: NotificationResponse is an
+  -- asynchronous message Postgres can deliver interleaved with any
+  -- query's own responses (CommandComplete -> NotificationResponse ->
+  -- ReadyForQuery is an explicitly permitted ordering), not just while
+  -- waitForNotification is the one reading. A stray notification arriving
+  -- while an ordinary query runs on the same connection must not corrupt
+  -- that query's result, and must not be dropped.
+  Right dbListener <- connectDB cfg
+    | Left err => putStrLn ("FAIL connect listener (notify-during-query): " ++ displayError err)
+  Right _ <- listenChannel dbListener "idris2_pg_test_channel2"
+    | Left err => putStrLn ("FAIL LISTEN (notify-during-query): " ++ displayError err)
+
+  notifySent <- makeChannel
+  _ <- fork $ do
+    notifierRes <- connectDB cfg
+    case notifierRes of
+         Left err => putStrLn ("FAIL connect notifier (notify-during-query): " ++ displayError err)
+         Right dbNotifier => do
+           _ <- execCommand dbNotifier "NOTIFY idris2_pg_test_channel2, 'during-query'" []
+           closeDB dbNotifier
+    channelPut notifySent ()
+  channelGet notifySent  -- the NOTIFY has committed before the query below runs
+
+  -- pg_sleep gives the server a moment to actually deliver the pending
+  -- notification interleaved with this query's own response, rather than
+  -- as a wholly separate message before it.
+  Right rows <- queryRows dbListener "SELECT pg_sleep(0.3) IS NOT NULL AS slept" []
+    | Left err => putStrLn ("FAIL: ordinary query broke while a notification was pending: " ++ displayError err)
+  case map (\r => getBool r "slept") rows of
+       [Right True] => putStrLn "OK an ordinary query is unaffected by an interleaved NotificationResponse"
+       other        => putStrLn ("FAIL: ordinary query returned an unexpected result: " ++ show other)
+
+  notification <- waitForNotification dbListener
+  case notification of
+       Right (MkNotification _ "idris2_pg_test_channel2" "during-query") =>
+         putStrLn "OK the interleaved notification was queued, not dropped"
+       other => putStrLn ("FAIL: the interleaved notification was lost: " ++ show other)
+
+  Right _ <- unlistenChannel dbListener "idris2_pg_test_channel2"
+    | Left err => putStrLn ("FAIL UNLISTEN (notify-during-query): " ++ displayError err)
+  closeDB dbListener
+
+testAuthFailureHandling : PGConfig -> IO ()
+testAuthFailureHandling cfg = do
+  -- Regression test for review finding #6: a startup/auth failure must
+  -- surface the server's real error immediately, not a follow-on
+  -- "connection closed"/EOF error from reading a socket the failure
+  -- itself should have closed - and must not leak that socket, or enough
+  -- repeated failures (e.g. a retry loop with a stale/wrong password)
+  -- would exhaust file descriptors.
+  let badCfg = { password := "definitely-the-wrong-password" } cfg
+  results <- traverse (const (connectDB badCfg)) (replicate 50 ())
+  if all isLeft results
+     then putStrLn "OK 50 repeated failed connectDB calls (wrong password) all rejected cleanly, no FD exhaustion"
+     else putStrLn "FAIL: a bad-password connectDB call unexpectedly succeeded"
+  case results of
+       (Left (SqlError e) :: _) => putStrLn ("OK connectDB surfaces the real auth error: " ++ message e)
+       (Left err :: _)          => putStrLn ("FAIL: connectDB error was not a SqlError (likely an error-masking regression): " ++ displayError err)
+       _                        => putStrLn "FAIL: no results from repeated connectDB calls"
+  where
+    isLeft : Either a b -> Bool
+    isLeft (Left _) = True
+    isLeft (Right _) = False
 
 testNullHandling : DB -> IO ()
 testNullHandling db = do
@@ -390,6 +483,20 @@ testTLS cfg = do
                    other => putStrLn ("FAIL TLS parameterized query result: " ++ show other)
               other => putStrLn ("FAIL TLS parameterized query: " ++ show (map (map length) other))
 
+         -- Regression test for review finding #4: a Bind parameter this
+         -- large used to be sent as a single, too-large TLS record
+         -- (20000 application bytes -> one 20017-byte ciphertext record,
+         -- over RFC 8446's 16384-byte plaintext cap) - a compliant peer
+         -- must terminate the connection on receiving one, so this would
+         -- previously break the TLS connection outright.
+         let bigTlsString = pack (replicate 20000 'z')
+         bigRes <- queryRows db "SELECT length($1::text) AS len" [Just bigTlsString]
+         case bigRes of
+              Right [r] => case getInt r "len" of
+                   Right 20000 => putStrLn "OK a 20000-byte Bind parameter round-trips over TLS (record fragmentation)"
+                   other       => putStrLn ("FAIL: large TLS parameter round-trip: " ++ show other)
+              other => putStrLn ("FAIL: large TLS parameter query broke the connection: " ++ show other)
+
          -- cancelQuery opens its own fresh out-of-band connection, which
          -- also negotiates its own independent TLS handshake - a
          -- genuinely different code path from the main connection above.
@@ -427,6 +534,8 @@ main = do
   testValueTypes db
   testCancelQuery cfg
   testNotify cfg
+  testNotifyDuringQuery cfg
+  testAuthFailureHandling cfg
   testNullHandling db
   testPreparedCache db
   testBinaryFormat db
